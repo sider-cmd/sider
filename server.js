@@ -59,7 +59,7 @@ if (/^\d{4}$/.test(stockId)) {
     const latest = data.data[data.data.length - 1];
 
     const stockReply = `
-📈 台積電 (2330)
+📈 股票代號：${stockId}
 
 收盤價：${latest.close} 元
 開盤價：${latest.open} 元
