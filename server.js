@@ -39,7 +39,53 @@ async function handleEvent(event) {
 
   const userMessage = event.message.text;
   console.log(`收到 LINE 訊息: ${userMessage}`);
+// ================= 台股查詢功能 =================
 
+if (userMessage.includes("2330")) {
+
+  try {
+
+    const response = await fetch(
+      `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=2330&start_date=2026-05-29`,
+      {
+        headers: {
+          Authorization: `Bearer ${FINMIND_TOKEN}`
+        }
+      }
+    );
+
+    const data = await response.json();
+
+    const latest = data.data[data.data.length - 1];
+
+    const stockReply = `
+`📈 台積電 (2330)
+
+收盤價：${latest.close} 元
+開盤價：${latest.open} 元
+最高價：${latest.max} 元
+最低價：${latest.min} 元
+
+📊 成交股數：
+${latest.Trading_Volume}
+`;
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: stockReply
+    });
+
+  } catch (error) {
+
+    console.error(error);
+
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: '股票查詢失敗 😢'
+    });
+
+  }
+
+}
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
