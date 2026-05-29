@@ -13,7 +13,7 @@ const config = {
 
 const client = new line.Client(config);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
+const FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiU2lkZXIiLCJlbWFpbCI6ImxmY2x1MDQxNEBnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.K_yeruf5xx8yChBUdcpOTSVAak3zNgi81a0zmqYk96A";
 // =================【2. LINE Webhook 路由】=================
 app.post('/callback', line.middleware(config), async (req, res) => {
   // 💡 安全機制 1：如果 LINE 傳送空事件（核實機制），直接回覆 200 OK 應付它
