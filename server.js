@@ -58,7 +58,7 @@ if (/^\d{4}$/.test(stockId)) {
 
     const latest = data.data[data.data.length - 1];
 
-    const stockReply = `
+const stockReply = String.raw`
 📈 股票代號：${stockId}
 
 收盤價：${latest.close} 元
