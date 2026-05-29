@@ -37,16 +37,16 @@ async function handleEvent(event) {
     return Promise.resolve(null);
   }
 
-  const userMessage = event.message.text;
-  console.log(`收到 LINE 訊息: ${userMessage}`);
+  const userMessage = event.message.text;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
+  const stockId = userMessage.trim();
+console.log(`收到 LINE 訊息: ${userMessage}`);
 // ================= 台股查詢功能 =================
-
-if (userMessage.includes("2330")) {
+if (/^\d{4}$/.test(stockId)) {
 
   try {
 
     const response = await fetch(
-      `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=2330&start_date=2026-05-29`,
+     `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${stockId}&start_date=2026-05-29`,
       {
         headers: {
           Authorization: `Bearer ${FINMIND_TOKEN}`
