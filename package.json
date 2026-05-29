@@ -1,15 +1,17 @@
 {
-  "name": "line-bot",
+  "name": "line-ai-stock-bot",
   "version": "1.0.0",
-  "description": "LINE AI Bot",
+  "description": "LINE AI Stock Assistant",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "@line/bot-sdk": "^9.7.0",
-    "axios": "^1.6.8",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2"
+    "@line/bot-sdk": "^7.5.2",
+    "express": "^4.19.2",
+    "openai": "^4.52.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
