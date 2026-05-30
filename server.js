@@ -200,9 +200,55 @@ for (const key in stockNames) {
 if (reverseStockNames[stockId]) {
   stockId = reverseStockNames[stockId];
 }
-
 const stockName = stockNames[stockId] || "未知股票";
 console.log(`收到 LINE 訊息: ${userMessage}`);
+if (userMessage.includes("新聞")) {
+
+  let stockKeyword = userMessage.replace("新聞", "").trim();
+
+  if (reverseStockNames[stockKeyword]) {
+    stockKeyword = reverseStockNames[stockKeyword];
+  }
+
+  try {
+
+    const newsResponse = await fetch(
+      `https://api.finnhub.io/api/v1/company-news?symbol=TWSE:${stockKeyword}&from=2026-05-25&to=2026-05-30&token=${FINMIND_TOKEN}`
+    );
+
+    const newsData = await newsResponse.json();
+
+    if (!newsData.length) {
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: '查無新聞資料'
+      });
+    }
+
+    let newsText = `📰 最新新聞\n\n`;
+
+    newsData.slice(0, 3).forEach((news, index) => {
+      newsText += `${index + 1}. ${news.headline}\n`;
+      newsText += `${news.datetime}\n`;
+      newsText += `${news.url}\n\n`;
+    });
+
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: newsText
+    });
+
+  } catch (error) {
+
+    console.error(error);
+
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: '新聞查詢失敗'
+    });
+
+  }
+}
 // ================= 台股查詢功能 =================
 if (/^\d{4}$/.test(stockId) || reverseStockNames[userMessage.trim()]) {
   try {
