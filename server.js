@@ -39,10 +39,21 @@ async function handleEvent(event) {
 
   const userMessage = event.message.text;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
   const stockId = userMessage.trim();
+const stockNames = {
+  "2330": "台積電",
+  "2317": "鴻海",
+  "2454": "聯發科",
+  "2603": "長榮",
+  "2303": "聯電",
+  "2881": "富邦金",
+  "2882": "國泰金",
+  "1301": "台塑"
+};
+
+const stockName = stockNames[stockId] || "未知股票";
 console.log(`收到 LINE 訊息: ${userMessage}`);
 // ================= 台股查詢功能 =================
 if (/^\d{4}$/.test(stockId)) {
-
   try {
 
     const response = await fetch(
@@ -59,7 +70,7 @@ if (/^\d{4}$/.test(stockId)) {
     const latest = data.data[data.data.length - 1];
 
 const stockReply = String.raw`
-📈 股票代號：${stockId}
+📈 ${stockName}（${stockId}）
 
 收盤價：${latest.close} 元
 開盤價：${latest.open} 元
