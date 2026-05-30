@@ -2,7 +2,8 @@ const express = require('express');
 const path = require('path');
 const line = require('@line/bot-sdk');
 const { OpenAI } = require('openai');
-
+const axios = require('axios');
+const cheerio = require('cheerio');
 const app = express();
 
 // =================【1. LINE & OpenAI 設定】=================
@@ -209,8 +210,7 @@ if (userMessage.includes("新聞")) {
 
   try {
 
-    const axios = require("axios");
-    const cheerio = require("cheerio");
+    
 
     const url = `https://tw.stock.yahoo.com/quote/${stockId}/news`;
 
