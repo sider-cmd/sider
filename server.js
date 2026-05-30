@@ -202,53 +202,65 @@ if (reverseStockNames[stockId]) {
 }
 const stockName = stockNames[stockId] || "未知股票";
 console.log(`收到 LINE 訊息: ${userMessage}`);
+
 if (userMessage.includes("新聞")) {
 
-  let stockKeyword = userMessage.replace("新聞", "").trim();
-
-  if (reverseStockNames[stockKeyword]) {
-    stockKeyword = reverseStockNames[stockKeyword];
-  }
+  const keyword = userMessage.replace("新聞", "").trim();
 
   try {
 
-    const newsResponse = await fetch(
-      `https://api.finnhub.io/api/v1/company-news?symbol=TWSE:${stockKeyword}&from=2026-05-25&to=2026-05-30&token=${FINMIND_TOKEN}`
-    );
+    const axios = require("axios");
+    const cheerio = require("cheerio");
 
-    const newsData = await newsResponse.json();
+    const url = `https://tw.stock.yahoo.com/quote/${stockId}/news`;
 
-    if (!newsData.length) {
-      return client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: '查無新聞資料'
-      });
-    }
+    const newsPage = await axios.get(url);
 
-    let newsText = `📰 最新新聞\n\n`;
+    const $ = cheerio.load(newsPage.data);
 
-    newsData.slice(0, 3).forEach((news, index) => {
-      newsText += `${index + 1}. ${news.headline}\n`;
-      newsText += `${news.datetime}\n`;
-      newsText += `${news.url}\n\n`;
+    let newsList = [];
+
+    $("h3").each((i, el) => {
+
+      const title = $(el).text().trim();
+
+      if (title.length > 10) {
+        newsList.push(title);
+      }
+
     });
 
+    if (newsList.length === 0) {
+
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: `${keyword} 查無新聞資料`
+      });
+
+    }
+
+    const replyText =
+      `📰 ${keyword} 最新新聞：\n\n` +
+      newsList.slice(0, 5).join("\n\n");
+
     return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: newsText
+      type: "text",
+      text: replyText
     });
 
   } catch (error) {
 
-    console.error(error);
+    console.log(error);
 
     return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: '新聞查詢失敗'
+      type: "text",
+      text: "新聞查詢失敗"
     });
 
   }
 }
+
+
 // ================= 台股查詢功能 =================
 if (/^\d{4}$/.test(stockId) || reverseStockNames[userMessage.trim()]) {
   try {
