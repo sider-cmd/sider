@@ -204,62 +204,57 @@ if (reverseStockNames[stockId]) {
 const stockName = stockNames[stockId] || "未知股票";
 console.log(`收到 LINE 訊息: ${userMessage}`);
 
-if (userMessage.includes("新聞")) {
+async function getNews(keyword) {
+    try {
+        // 1. 強制將關鍵字進行網址編碼，避免中文字造成 Yahoo 噴 400 錯誤
+        const encodedKeyword = encodeURIComponent(keyword.trim());
+        const url = `https://tw.news.yahoo.com/search?p=${encodedKeyword}`;
+        
+        console.log("正在爬取的網址:", url); // 這行可以在 Log 幫我們對答案
 
-  const keyword = userMessage.replace("新聞", "").trim();
-
-  try {
-
-    
-
-    const url = `https://tw.stock.yahoo.com/quote/${keyword}/news`;
-
-    const newsPage = await axios.get(url);
-
-    const $ = cheerio.load(newsPage.data);
-
-    let newsList = [];
-
-    $("h3").each((i, el) => {
-
-      const title = $(el).text().trim();
-
-      if (title.length > 10) {
-        newsList.push(title);
-      }
-
-    });
-
-    if (newsList.length === 0) {
-
-      return client.replyMessage(event.replyToken, {
-        type: "text",
-        text: `${keyword} 查無新聞資料`
-      });
-
+        // 2. 加上完整的 Headers 偽裝成真人在用 Chrome 瀏覽器
+        const response = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+            },
+            timeout: 5000 // 5秒超時設定
+        });
+        
+        // 3. 解析網頁內容
+        const $ = cheerio.load(response.data);
+        let newsMessage = `🔍 ${keyword} 最新新聞：\n`;
+        let count = 0;
+        
+        // 4. Yahoo 新聞常見的標題 class 是 .Storyli 或 li.item
+        // 這裡做雙重保障，只要抓得到 a 標籤就試試看
+        $('li.item, .Storyli').each((index, element) => {
+            if (count < 3) { // 只取前 3 則
+                const title = $(element).find('a').text().trim();
+                let link = $(element).find('a').attr('href');
+                
+                if (title && link) {
+                    // 如果網址是相對路徑，自動補上 Yahoo 字頭
+                    if (link.startsWith('/')) {
+                        link = `https://tw.news.yahoo.com${link}`;
+                    }
+                    newsMessage += `\n📺 ${title}\n🔗 ${link}\n`;
+                    count++;
+                }
+            }
+        });
+        
+        if (count === 0) {
+            return `查無「${keyword}」的相關新聞。`;
+        }
+        
+        return newsMessage;
+    } catch (error) {
+        // 如果又失敗了，這行會在 Railway Log 裡面印出到底是為什麼 400
+        console.error("新聞爬蟲詳細錯誤資訊:", error.message); 
+        return "新聞查詢失敗";
     }
-
-    const replyText =
-      `📰 ${keyword} 最新新聞：\n\n` +
-      newsList.slice(0, 5).join("\n\n");
-
-    return client.replyMessage(event.replyToken, {
-      type: "text",
-      text: replyText
-    });
-
-  } catch (error) {
-
-    console.log(error);
-
-    return client.replyMessage(event.replyToken, {
-      type: "text",
-      text: "新聞查詢失敗"
-    });
-
-  }
 }
-
 
 // ================= 台股查詢功能 =================
 if (/^\d{4}$/.test(stockId) || reverseStockNames[userMessage.trim()]) {
