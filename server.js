@@ -68,15 +68,25 @@ if (/^\d{4}$/.test(stockId)) {
     const data = await response.json();
 
     const latest = data.data[data.data.length - 1];
+const spread = latest.close - latest.open;
+const percent = ((spread / latest.open) * 100).toFixed(2);
 
+let trendIcon = "➖";
+
+if (spread > 0) {
+  trendIcon = "🔺";
+} else if (spread < 0) {
+  trendIcon = "🔻";
+}
 const stockReply = String.raw`
 📈 ${stockName}（${stockId}）
 
 收盤價：${latest.close} 元
+漲跌：${spread.toFixed(1)} 元 ${trendIcon}
+漲幅：${percent}% ${trendIcon}
 開盤價：${latest.open} 元
 最高價：${latest.max} 元
 最低價：${latest.min} 元
-
 📊 成交股數：
 ${latest.Trading_Volume}
 `;
