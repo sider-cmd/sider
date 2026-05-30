@@ -38,7 +38,7 @@ async function handleEvent(event) {
   }
 
   const userMessage = event.message.text;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
- 
+let stockId = userMessage.trim(); 
 const stockNames = {
 "2330": "台積電",
 "2317": "鴻海",
@@ -204,7 +204,7 @@ if (reverseStockNames[stockId]) {
 const stockName = stockNames[stockId] || "未知股票";
 console.log(`收到 LINE 訊息: ${userMessage}`);
 // ================= 台股查詢功能 =================
-if (/^\d{4}$/.test(stockId)) {
+if (/^\d{4}$/.test(stockId) || reverseStockNames[userMessage.trim()]) {
   try {
 
     const response = await fetch(
