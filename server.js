@@ -196,9 +196,11 @@ const reverseStockNames = {};
 for (const key in stockNames) {
   reverseStockNames[stockNames[key]] = key;
 }
+
 if (reverseStockNames[stockId]) {
   stockId = reverseStockNames[stockId];
 }
+
 const stockName = stockNames[stockId] || "未知股票";
 console.log(`收到 LINE 訊息: ${userMessage}`);
 // ================= 台股查詢功能 =================
