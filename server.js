@@ -68,6 +68,7 @@ if (/^\d{4}$/.test(stockId)) {
     const data = await response.json();
 
     const latest = data.data[data.data.length - 1];
+const now = new Date().toLocaleString("zh-TW");
 const spread = latest.close - latest.open;
 const percent = ((spread / latest.open) * 100).toFixed(2);
 
@@ -80,7 +81,7 @@ if (spread > 0) {
 }
 const stockReply = String.raw`
 📈 ${stockName}（${stockId}）
-
+🕒 更新時間：${now}
 收盤價：${latest.close} 元
 漲跌：${spread.toFixed(1)} 元 ${trendIcon}
 漲幅：${percent}% ${trendIcon}
