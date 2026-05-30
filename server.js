@@ -212,7 +212,7 @@ if (userMessage.includes("新聞")) {
 
     
 
-    const url = `https://tw.stock.yahoo.com/quote/${stockId}/news`;
+    const url = `https://tw.stock.yahoo.com/quote/${keyword}/news`;
 
     const newsPage = await axios.get(url);
 
