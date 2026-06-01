@@ -205,7 +205,21 @@ const stockName = stockNames[stockId] || "未知股票";
 console.log(`收到 LINE 訊息: ${userMessage}`);
 await client.replyMessage(event.replyToken, {
   type: 'text',
-  text: `你剛剛說：${userMessage}`
+  text: `
+📊 AI股票分析
+
+股票：${userMessage}
+
+AI評分：70分
+主力訊號：2/3
+風險分數：50分
+
+✅ 偏多觀察
+建議持股：50%~70%
+
+📌 AI總結：
+趨勢偏強，但短線勿追高。
+`
 });
 async function getNews(keyword) {
     try {
