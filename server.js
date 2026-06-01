@@ -219,7 +219,7 @@ AI評分：70分
 
 📌 AI總結：
 趨勢偏強，但短線勿追高。
-`
+
 });
 async function getNews(keyword) {
     try {
