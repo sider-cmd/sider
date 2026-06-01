@@ -203,7 +203,10 @@ if (reverseStockNames[stockId]) {
 }
 const stockName = stockNames[stockId] || "未知股票";
 console.log(`收到 LINE 訊息: ${userMessage}`);
-
+await client.replyMessage(event.replyToken, {
+  type: 'text',
+  text: `你剛剛說：${userMessage}`
+});
 async function getNews(keyword) {
     try {
         // 1. 強制將關鍵字進行網址編碼，避免中文字造成 Yahoo 噴 400 錯誤
