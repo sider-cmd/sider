@@ -273,9 +273,20 @@ if (isStockQuery) {
     }
 
     const latest = dataArr[dataArr.length - 1];
-    const spread = latest.close - latest.open;
-    const percent = ((spread / latest.open) * 100).toFixed(2);
-    const trendIcon = spread > 0 ? "🔺" : spread < 0 ? "🔻" : "➖";
+    const trendIcon =
+  Number(change) > 0
+    ? "📈"
+    : Number(change) < 0
+    ? "📉"
+    : "➖";
+
+const now = new Date().toLocaleString("zh-TW");
+    const trendIcon =
+  Number(change) > 0
+    ? "📈"
+    : Number(change) < 0
+    ? "📉"
+    : "➖";
     const now = new Date().toLocaleString("zh-TW");
 
     const stockReply =
