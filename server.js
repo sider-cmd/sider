@@ -209,10 +209,11 @@ const stockName = stockNames[stockCode] || userMessage;
 console.log(`收到 LINE 訊息: ${userMessage}`);
 
 const response = await axios.get(
-`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${stockCode}.tw`
+`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${stockCode}.tw|otc_${stockCode}.tw`
 );
 
 const stockData = response.data.msgArray[0] || {};
+console.log(response.data);
 
 const stockPrice = stockData.z || "查無資料";
   
