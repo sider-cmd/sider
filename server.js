@@ -198,11 +198,13 @@ for (const key in stockNames) {
   reverseStockNames[stockNames[key]] = key;
 }
 
-let stockCode = userMessage;
+let stockCode = userMessage.trim();
 
-if (reverseStockNames[userMessage]) {
-  stockCode = reverseStockNames[userMessage];
+if (reverseStockNames[stockCode]) {
+  stockCode = reverseStockNames[stockCode];
 }
+
+const apiCode = `tse_${stockCode}.tw`;
 
 stockCode = `tse_${stockCode}.tw`;
 
@@ -211,7 +213,7 @@ const stockName = stockNames[stockCode] || userMessage;
 console.log(`收到 LINE 訊息: ${userMessage}`);
 
 const response = await axios.get(
-`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${stockCode}`
+`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${apiCode}`
 );
 
 const stockData = response.data.msgArray[0] || {};
