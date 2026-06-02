@@ -201,7 +201,7 @@ for (const key in stockNames) {
 const cleanInput = userMessage.trim();
 const analysisMatch = cleanInput.match(/^分析\s*(.+)$/);
 const institutionalMatch = cleanInput.match(/^法人\s*(.+)$/);
-
+const marginMatch = cleanInput.match(/^籌碼\s*(.+)$/);
 const stockInput = analysisMatch
   ? analysisMatch[1].trim()
   : institutionalMatch
