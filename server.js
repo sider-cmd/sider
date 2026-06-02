@@ -215,7 +215,7 @@ const stockName = stockNames[pureCode] || stockInput;
 
 const isStockQuery =
   /^\d{4,6}$/.test(pureCode) ||
-  Boolean(reverseStockNames[cleanInput]);
+  Boolean(reverseStockNames[stockInput]);
 
 if (isStockQuery) {
   try {
