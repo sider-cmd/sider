@@ -228,11 +228,15 @@ console.log(
 );
 
 // 股價防呆
-const stockPrice =
-  stockData.z ||
-  stockData.pz ||
-  stockData.y ||
-  "查無市價";
+let stockPrice = "查無市價";
+
+if (stockData.z && stockData.z !== "-") {
+  stockPrice = stockData.z;
+} else if (stockData.pz && stockData.pz !== "-") {
+  stockPrice = stockData.pz;
+} else if (stockData.y && stockData.y !== "-") {
+  stockPrice = stockData.y;
+}
 
 
 // 2. 發送訊息給 LINE
