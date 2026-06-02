@@ -209,66 +209,56 @@ if (reverseStockNames[cleanInput]) {
 // 股票名稱
 const stockName = stockNames[pureCode] || cleanInput;
 
-// API 專用格式
-const apiChannel = `tse_${pureCode}.tw`;
-
-console.log(`[系統日誌] 查詢股票: ${stockName} (${pureCode})`);
-
-const response = await axios.get(
-  `https://query1.finance.yahoo.com/v8/finance/chart/${pureCode}.TW`
-);
-
-const result = response.data.chart.result[0].meta;
-
-const stockPrice = result.regularMarketPrice;
-const previousClose = result.previousClose;
-const openPrice =
-  result.regularMarketOpen ||
-  result.previousClose ||
-  stockPrice;
-const highPrice = result.regularMarketDayHigh;
-const lowPrice = result.regularMarketDayLow;
-
-const change = (stockPrice - previousClose).toFixed(1);
-const percent = (
-  ((stockPrice - previousClose) / previousClose) *
-  100
-).toFixed(2);
-
-// 取得資料
-const stockData = response.data.msgArray?.[0] || {};
-
-// 印出 API 原始資料
-console.log(
-  "[API 回傳資料]",
-  JSON.stringify(response.data, null, 2)
-);
-
-// 股價防呆
-
-
-
-// 2. 發送訊息給 LINE
-// ===== 判斷是否為股票查詢 =====
-const isStockQuery = /^\d{4,6}$/.test(pureCode) || reverseStockNames[userMessage.trim()];
+const isStockQuery =
+  /^\d{4,6}$/.test(pureCode) ||
+  Boolean(reverseStockNames[cleanInput]);
 
 if (isStockQuery) {
   try {
+    const response = await axios.get(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${pureCode}.TW`
+    );
+
+    const result = response.data.chart.result?.[0]?.meta;
+    if (!result) {
+      throw new Error("Yahoo 查無股票資料");
+    }
+
+    const stockPrice = result.regularMarketPrice;
+    const previousClose = result.previousClose;
+    const openPrice =
+      result.regularMarketOpen ??
+      result.previousClose ??
+      "暫無資料";
+    const highPrice = result.regularMarketDayHigh ?? "暫無資料";
+    const lowPrice = result.regularMarketDayLow ?? "暫無資料";
+
+    const change = (stockPrice - previousClose).toFixed(1);
+    const percent = (
+      ((stockPrice - previousClose) / previousClose) *
+      100
+    ).toFixed(2);
+
+    const startDate = new Date(Date.now() - 30 * 86400000)
+      .toISOString()
+      .slice(0, 10);
+
     const finRes = await axios.get(
-      `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${pureCode}&start_date=2026-05-29`,
+      `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${pureCode}&start_date=${startDate}`,
       { headers: { Authorization: `Bearer ${FINMIND_TOKEN}` } }
     );
 
-    const dataArr = finRes.data?.data;
-    if (!dataArr || dataArr.length === 0) {
-      return client.replyMessage(event.replyToken, {
-        type: 'text',
-        text: `查無「${pureCode}」的股價資料，請確認代號是否正確。`
-      });
-    }
+    const closes = (finRes.data?.data || [])
+      .slice(-5)
+      .map((item) => Number(item.close))
+      .filter(Number.isFinite);
 
-    const latest = dataArr[dataArr.length - 1];
-   const trendIcon =
+    const ma5 =
+      closes.length === 5
+        ? (closes.reduce((sum, value) => sum + value, 0) / 5).toFixed(2)
+        : "資料不足";
+
+    const trendIcon =
       Number(change) > 0
         ? "📈"
         : Number(change) < 0
@@ -282,82 +272,24 @@ if (isStockQuery) {
 💰 現價：${stockPrice} 元
 📈 漲跌：${change} 元 ${trendIcon}
 📊 漲幅：${percent}% ${trendIcon}
+📉 五日均線：${ma5} 元
 
 🔓 開盤：${openPrice} 元
 ⬆️ 最高：${highPrice} 元
 ⬇️ 最低：${lowPrice} 元`;
+
     return client.replyMessage(event.replyToken, {
-      type: 'text',
+      type: "text",
       text: stockReply
     });
-
   } catch (error) {
-    console.error('股票查詢錯誤:', error.message);
+    console.error("股票查詢錯誤:", error.message);
     return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: '股票查詢失敗 😢'
+      type: "text",
+      text: "股票查詢失敗 😢"
     });
   }
 }
-
-// ================= 台股查詢功能 =================
-if (/^\d{4}$/.test(stockId) || reverseStockNames[userMessage.trim()]) {
-  try {
-
-    const response = await fetch(
-     `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${stockId}&start_date=2026-05-29`,
-      {
-        headers: {
-          Authorization: `Bearer ${FINMIND_TOKEN}`
-        }
-      }
-    );
-
-    const data = await response.json();
-
-    const latest = data.data[data.data.length - 1];
-const now = new Date().toLocaleString("zh-TW");
-const spread = latest.close - latest.open;
-const percent = ((spread / latest.open) * 100).toFixed(2);
-
-let trendIcon = "➖";
-
-if (spread > 0) {
-  trendIcon = "🔺";
-} else if (spread < 0) {
-  trendIcon = "🔻";
-}
-const stockReply = String.raw`
-📈 ${stockName}（${stockId}）
-🕒 更新時間：${now}
-收盤價：${latest.close} 元
-漲跌：${spread.toFixed(1)} 元 ${trendIcon}
-漲幅：${percent}% ${trendIcon}
-開盤價：${latest.open} 元
-最高價：${latest.max} 元
-最低價：${latest.min} 元
-📊 成交股數：
-${latest.Trading_Volume}
-`;
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: stockReply
-    });
-
-  } catch (error) {
-
-    console.error(error);
-
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: '股票查詢失敗 😢'
-    });
-
-  }
-
-}
-  try {
-    const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         { 
