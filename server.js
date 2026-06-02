@@ -215,8 +215,22 @@ const apiChannel = `tse_${pureCode}.tw`;
 console.log(`[系統日誌] 查詢股票: ${stockName} (${pureCode})`);
 
 const response = await axios.get(
-  `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${apiChannel}`
+  `https://query1.finance.yahoo.com/v8/finance/chart/${pureCode}.TW`
 );
+
+const result = response.data.chart.result[0].meta;
+
+const stockPrice = result.regularMarketPrice;
+const previousClose = result.previousClose;
+const openPrice = result.regularMarketOpen;
+const highPrice = result.regularMarketDayHigh;
+const lowPrice = result.regularMarketDayLow;
+
+const change = (stockPrice - previousClose).toFixed(1);
+const percent = (
+  ((stockPrice - previousClose) / previousClose) *
+  100
+).toFixed(2);
 
 // 取得資料
 const stockData = response.data.msgArray?.[0] || {};
@@ -267,13 +281,13 @@ if (isStockQuery) {
     const stockReply =
 `📈 ${stockName}（${pureCode}）
 🕒 更新時間：${now}
-收盤價：${latest.close} 元
-漲跌：${spread.toFixed(1)} 元 ${trendIcon}
-漲幅：${percent}% ${trendIcon}
-開盤價：${latest.open} 元
-最高價：${latest.max} 元
-最低價：${latest.min} 元
-📊 成交量：${latest.Trading_Volume}`;
+💰 現價：${stockPrice} 元
+📈 漲跌：${change} 元 ${trendIcon}
+📊 漲幅：${percent}% ${trendIcon}
+
+🔓 開盤：${openPrice} 元
+⬆️ 最高：${highPrice} 元
+⬇️ 最低：${lowPrice} 元
 
     return client.replyMessage(event.replyToken, {
       type: 'text',
