@@ -206,7 +206,7 @@ console.log(`收到 LINE 訊息: ${userMessage}`);
   const stockPrice = Math.floor(Math.random() * 1000) + 100;
 await client.replyMessage(event.replyToken, {
   type: 'text',
-  text: `
+text: `
 📊 AI股票分析
 
 股票：${userMessage}
@@ -222,7 +222,7 @@ AI評分：70分
 
 📌 AI總結：
 趨勢偏強，但短線勿追高。
-
+`
 });
 async function getNews(keyword) {
     try {
