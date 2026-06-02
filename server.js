@@ -269,6 +269,55 @@ if (isStockQuery) {
       closes.length === 5
         ? (closes.reduce((sum, value) => sum + value, 0) / 5).toFixed(2)
         : "資料不足";
+    if (isInstitutionalQuery) {
+      const chipRes = await axios.get(
+        `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id=${pureCode}&start_date=${startDate}`,
+        { headers: { Authorization: `Bearer ${FINMIND_TOKEN}` } }
+      );
+
+      const chipData = chipRes.data?.data || [];
+      if (chipData.length === 0) {
+        throw new Error("查無法人買賣資料");
+      }
+
+      const latestDate = chipData[chipData.length - 1].date;
+      const latestRows = chipData.filter((item) => item.date === latestDate);
+
+      const netLots = (...names) =>
+        (
+          latestRows
+            .filter((item) => names.includes(item.name))
+            .reduce(
+              (sum, item) => sum + Number(item.buy) - Number(item.sell),
+              0
+            ) / 1000
+        ).toFixed(0);
+
+      const foreign = netLots("Foreign_Investor");
+      const trust = netLots("Investment_Trust");
+      const dealer = netLots("Dealer_self", "Dealer_Hedging");
+      const total = (
+        Number(foreign) +
+        Number(trust) +
+        Number(dealer)
+      ).toFixed(0);
+
+      const showLots = (value) =>
+        `${Number(value) > 0 ? "+" : ""}${value} 張`;
+
+      const chipReply = `🏦 ${stockName}（${pureCode}）法人買賣
+🗓️ 日期：${latestDate}
+
+🌍 外資：${showLots(foreign)}
+🏢 投信：${showLots(trust)}
+🏦 自營商：${showLots(dealer)}
+📊 三大法人合計：${showLots(total)}`;
+
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: chipReply
+      });
+    }
 if (isAnalysisQuery) {
       const analysisPrompt = `請根據以下真實行情，提供簡潔的繁體中文技術分析。
 不要使用 Markdown 符號，不要保證獲利，結尾提醒投資人自行評估風險。
