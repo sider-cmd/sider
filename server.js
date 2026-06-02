@@ -201,10 +201,14 @@ for (const key in stockNames) {
 const cleanInput = userMessage.trim(); 
 let pureCode = cleanInput;
 
+// 如果輸入的是中文（例如台積電），就轉成代號
 if (reverseStockNames[cleanInput]) {
   pureCode = reverseStockNames[cleanInput];
 }
 
+// 安全做法：股票名稱直接等於 cleanInput（如果是輸入台積電就顯示台積電，輸入2330就顯示2330）
+const stockName = cleanInput; 
+const apiCode = `tse_${pureCode}.tw`;
 const stockName = stockNames[pureCode] || cleanInput;
 const apiCode = `tse_${pureCode}.tw`;
 
