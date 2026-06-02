@@ -203,7 +203,8 @@ if (reverseStockNames[stockId]) {
 }
 const stockName = stockNames[stockId] || "未知股票";
 console.log(`收到 LINE 訊息: ${userMessage}`);
-  const stockPrice = Math.floor(Math.random() * 1000) + 100;
+  const stockData = { price: Math.floor(Math.random() * 1000) + 100 };
+  const stockPrice = stockData.price || "查無資料";
 await client.replyMessage(event.replyToken, {
   type: 'text',
 text: `
