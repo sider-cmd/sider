@@ -271,6 +271,42 @@ if (isStockQuery) {
       closes.length === 5
         ? (closes.reduce((sum, value) => sum + value, 0) / 5).toFixed(2)
         : "資料不足";
+    if (isMarginQuery) {
+      const marginRes = await axios.get(
+        `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMarginPurchaseShortSale&data_id=${pureCode}&start_date=${startDate}`,
+        { headers: { Authorization: `Bearer ${FINMIND_TOKEN}` } }
+      );
+
+      const marginData = marginRes.data?.data || [];
+      if (marginData.length === 0) {
+        throw new Error("查無融資融券資料");
+      }
+
+      const latest = marginData[marginData.length - 1];
+      const marginChange =
+        Number(latest.MarginPurchaseTodayBalance) -
+        Number(latest.MarginPurchaseYesterdayBalance);
+      const shortChange =
+        Number(latest.ShortSaleTodayBalance) -
+        Number(latest.ShortSaleYesterdayBalance);
+
+      const showChange = (value) =>
+        `${value > 0 ? "+" : ""}${value} 張`;
+
+      const marginReply = `📊 ${stockName}（${pureCode}）融資融券籌碼
+🗓️ 日期：${latest.date}
+
+💰 融資餘額：${latest.MarginPurchaseTodayBalance} 張
+📈 融資增減：${showChange(marginChange)}
+
+📉 融券餘額：${latest.ShortSaleTodayBalance} 張
+🔄 融券增減：${showChange(shortChange)}`;
+
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: marginReply
+      });
+    }
     if (isInstitutionalQuery) {
       const chipRes = await axios.get(
         `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id=${pureCode}&start_date=${startDate}`,
