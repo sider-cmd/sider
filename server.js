@@ -217,17 +217,23 @@ const response = await axios.get(
 `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${stockCode}.tw`
 );
 
-const stockData = response.data.msgArray[0] || {};
-console.log(JSON.stringify(response.data, null, 2));
-console.log(response.data);
+const stockData = response.data?.msgArray?.[0] || {};
+console.log("[系統日誌] 收到證交所資料:", JSON.stringify(stockData));
 
-let stockPrice = stockData.z;
-if (!stockPrice || stockPrice === "-" || stockPrice === "") {
-  stockPrice = stockData.pz || stockData.y || "查無市價";  
+// 1. 智慧判定股價（徹底解決減號與空值問題）
+let stockPrice = "查無市價";
+if (stockData.z && stockData.z !== "-") {
+  stockPrice = stockData.z;
+} else if (stockData.pz && stockData.pz !== "-") {
+  stockPrice = stockData.pz;
+} else if (stockData.y && stockData.y !== "-") {
+  stockPrice = stockData.y;
+}
+
+// 2. 發送訊息給 LINE
 await client.replyMessage(event.replyToken, {
   type: 'text',
-text: `
-📊 AI股票分析
+  text: `📊 AI股票分析
 
 股票：${stockName}
 
@@ -241,8 +247,7 @@ AI評分：70分
 建議持股：50%~70%
 
 📌 AI總結：
-趨勢偏強，但短線勿追高。
-`
+趨勢偏強，但短線勿追高。`
 });
 async function getNews(keyword) {
     try {
