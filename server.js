@@ -247,6 +247,11 @@ await client.replyMessage(event.replyToken, {
 股票：${stockName}
 
 目前股價：${stockPrice} 元
+代號：${pureCode}
+API代號：${apiCode}
+z：${stockData.z}
+pz：${stockData.pz}
+y：${stockData.y}
 
 AI評分：70分
 主力訊號：2/3
