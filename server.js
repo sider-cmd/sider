@@ -240,78 +240,53 @@ if (stockData.z && stockData.z !== "-") {
 
 
 // 2. 發送訊息給 LINE
-await client.replyMessage(event.replyToken, {
-  type: 'text',
-  text:
-`📊 AI股票分析
+// ===== 判斷是否為股票查詢 =====
+const isStockQuery = /^\d{4,6}$/.test(pureCode) || reverseStockNames[userMessage.trim()];
 
-股票：${stockName}
+if (isStockQuery) {
+  try {
+    const finRes = await axios.get(
+      `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${pureCode}&start_date=2026-05-29`,
+      { headers: { Authorization: `Bearer ${FINMIND_TOKEN}` } }
+    );
 
-目前股價：${stockPrice} 元
-
-股票代號：${pureCode}
-
-AI評分：70分
-主力訊號：2/3
-風險分數：50分
-
-✅ 偏多觀察
-建議持股：50%~70%
-
-📌 AI總結：
-趨勢偏強，但短線勿追高。`
-});
-
-async function getNews(keyword) {
-    try {
-        // 1. 強制將關鍵字進行網址編碼，避免中文字造成 Yahoo 噴 400 錯誤
-        const encodedKeyword = encodeURIComponent(keyword.trim());
-        const url = `https://tw.news.yahoo.com/search?p=${encodedKeyword}`;
-        
-        console.log("正在爬取的網址:", url); // 這行可以在 Log 幫我們對答案
-
-        // 2. 加上完整的 Headers 偽裝成真人在用 Chrome 瀏覽器
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
-            },
-            timeout: 5000 // 5秒超時設定
-        });
-        
-        // 3. 解析網頁內容
-        const $ = cheerio.load(response.data);
-        let newsMessage = `🔍 ${keyword} 最新新聞：\n`;
-        let count = 0;
-        
-        // 4. Yahoo 新聞常見的標題 class 是 .Storyli 或 li.item
-        // 這裡做雙重保障，只要抓得到 a 標籤就試試看
-        $('li.item, .Storyli').each((index, element) => {
-            if (count < 3) { // 只取前 3 則
-                const title = $(element).find('a').text().trim();
-                let link = $(element).find('a').attr('href');
-                
-                if (title && link) {
-                    // 如果網址是相對路徑，自動補上 Yahoo 字頭
-                    if (link.startsWith('/')) {
-                        link = `https://tw.news.yahoo.com${link}`;
-                    }
-                    newsMessage += `\n📺 ${title}\n🔗 ${link}\n`;
-                    count++;
-                }
-            }
-        });
-        
-        if (count === 0) {
-            return `查無「${keyword}」的相關新聞。`;
-        }
-        
-        return newsMessage;
-    } catch (error) {
-        // 如果又失敗了，這行會在 Railway Log 裡面印出到底是為什麼 400
-        console.error("新聞爬蟲詳細錯誤資訊:", error.message); 
-        return "新聞查詢失敗";
+    const dataArr = finRes.data?.data;
+    if (!dataArr || dataArr.length === 0) {
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: `查無「${pureCode}」的股價資料，請確認代號是否正確。`
+      });
     }
+
+    const latest = dataArr[dataArr.length - 1];
+    const spread = latest.close - latest.open;
+    const percent = ((spread / latest.open) * 100).toFixed(2);
+    const trendIcon = spread > 0 ? "🔺" : spread < 0 ? "🔻" : "➖";
+    const now = new Date().toLocaleString("zh-TW");
+
+    const stockReply =
+`📈 ${stockName}（${pureCode}）
+🕒 更新時間：${now}
+收盤價：${latest.close} 元
+漲跌：${spread.toFixed(1)} 元 ${trendIcon}
+漲幅：${percent}% ${trendIcon}
+開盤價：${latest.open} 元
+最高價：${latest.max} 元
+最低價：${latest.min} 元
+📊 成交量：${latest.Trading_Volume}`;
+
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: stockReply
+    });
+
+  } catch (error) {
+    console.error('股票查詢錯誤:', error.message);
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: '股票查詢失敗 😢'
+    });
+  }
 }
 
 // ================= 台股查詢功能 =================
