@@ -265,24 +265,16 @@ if (isStockQuery) {
     }
 
     const latest = dataArr[dataArr.length - 1];
-    const trendIcon =
-  Number(change) > 0
-    ? "📈"
-    : Number(change) < 0
-    ? "📉"
-    : "➖";
+   const trendIcon =
+      Number(change) > 0
+        ? "📈"
+        : Number(change) < 0
+        ? "📉"
+        : "➖";
 
-const now = new Date().toLocaleString("zh-TW");
-    const trendIcon =
-  Number(change) > 0
-    ? "📈"
-    : Number(change) < 0
-    ? "📉"
-    : "➖";
     const now = new Date().toLocaleString("zh-TW");
 
-    const stockReply =
-`📈 ${stockName}（${pureCode}）
+    const stockReply = `📈 ${stockName}（${pureCode}）
 🕒 更新時間：${now}
 💰 現價：${stockPrice} 元
 📈 漲跌：${change} 元 ${trendIcon}
@@ -290,8 +282,7 @@ const now = new Date().toLocaleString("zh-TW");
 
 🔓 開盤：${openPrice} 元
 ⬆️ 最高：${highPrice} 元
-⬇️ 最低：${lowPrice} 元
-
+⬇️ 最低：${lowPrice} 元`;
     return client.replyMessage(event.replyToken, {
       type: 'text',
       text: stockReply
