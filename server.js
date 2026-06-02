@@ -247,6 +247,7 @@ await client.replyMessage(event.replyToken, {
 股票：${stockName}
 
 目前股價：${stockPrice} 元
+
 代號：${pureCode}
 API代號：${apiCode}
 z：${stockData.z}
@@ -263,6 +264,7 @@ AI評分：70分
 📌 AI總結：
 趨勢偏強，但短線勿追高。`
 });
+
 async function getNews(keyword) {
     try {
         // 1. 強制將關鍵字進行網址編碼，避免中文字造成 Yahoo 噴 400 錯誤
