@@ -261,7 +261,46 @@ if (isStockQuery) {
       closes.length === 5
         ? (closes.reduce((sum, value) => sum + value, 0) / 5).toFixed(2)
         : "資料不足";
+if (isAnalysisQuery) {
+      const analysisPrompt = `請根據以下真實行情，提供簡潔的繁體中文技術分析。
+不要使用 Markdown 符號，不要保證獲利，結尾提醒投資人自行評估風險。
 
+股票：${stockName}（${pureCode}）
+現價：${stockPrice} 元
+前收：${previousClose} 元
+漲跌：${change} 元
+漲幅：${percent}%
+五日均線：${ma5} 元
+今日開盤：${openPrice} 元
+今日最高：${highPrice} 元
+今日最低：${lowPrice} 元
+
+請依序說明：
+1. 今日走勢
+2. 現價與五日均線關係
+3. 短線觀察重點
+4. 風險提醒`;
+
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: "你是台股技術分析助理。只能根據提供的行情分析，使用繁體中文，內容精簡易讀。"
+          },
+          {
+            role: "user",
+            content: analysisPrompt
+          }
+        ],
+        max_tokens: 500
+      });
+
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: completion.choices[0].message.content.trim()
+      });
+    }
     const trendIcon =
       Number(change) > 0
         ? "📈"
