@@ -233,15 +233,7 @@ const stockPrice =
   stockData.pz ||
   stockData.y ||
   "查無市價";
-// 1. 智慧判定股價（徹底解決減號與空值問題）
-let stockPrice = "查無市價";
-if (stockData.z && stockData.z !== "-") {
-  stockPrice = stockData.z;
-} else if (stockData.pz && stockData.pz !== "-") {
-  stockPrice = stockData.pz;
-} else if (stockData.y && stockData.y !== "-") {
-  stockPrice = stockData.y;
-}
+
 
 // 2. 發送訊息給 LINE
 await client.replyMessage(event.replyToken, {
