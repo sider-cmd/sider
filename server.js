@@ -222,7 +222,10 @@ const result = response.data.chart.result[0].meta;
 
 const stockPrice = result.regularMarketPrice;
 const previousClose = result.previousClose;
-const openPrice = result.regularMarketOpen;
+const openPrice =
+  result.regularMarketOpen ||
+  result.previousClose ||
+  stockPrice;
 const highPrice = result.regularMarketDayHigh;
 const lowPrice = result.regularMarketDayLow;
 
