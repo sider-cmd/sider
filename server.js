@@ -206,6 +206,8 @@ const stockInput = analysisMatch
   ? analysisMatch[1].trim()
   : institutionalMatch
   ? institutionalMatch[1].trim()
+  : marginMatch
+  ? marginMatch[1].trim()
   : cleanInput;
 
 const isAnalysisQuery = Boolean(analysisMatch);
