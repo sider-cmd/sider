@@ -198,13 +198,19 @@ for (const key in stockNames) {
   reverseStockNames[stockNames[key]] = key;
 }
 
-if (reverseStockNames[stockId]) {
-  stockId = reverseStockNames[stockId];
+let stockCode = userMessage;
+
+if (reverseStockNames[userMessage]) {
+    stockCode = reverseStockNames[userMessage];
 }
-  const stockCode = reverseStockNames[userMessage] || userMessage;
-const stockName = stockNames[stockId] || "未知股票";
+
+const stockName = stockNames[stockCode] || userMessage;
+
 console.log(`收到 LINE 訊息: ${userMessage}`);
-  const response = await axios.get(`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${stockCode}.tw`);
+
+const response = await axios.get(
+`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${stockCode}.tw`
+);
 
 const stockData = response.data.msgArray[0] || {};
 
