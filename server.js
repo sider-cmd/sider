@@ -198,16 +198,20 @@ for (const key in stockNames) {
   reverseStockNames[stockNames[key]] = key;
 }
 
-const cleanInput = userMessage.trim(); 
-let pureCode = cleanInput;
+const cleanInput = userMessage.trim();
+const analysisMatch = cleanInput.match(/^分析\s*(.+)$/);
+const stockInput = analysisMatch ? analysisMatch[1].trim() : cleanInput;
+const isAnalysisQuery = Boolean(analysisMatch);
+
+let pureCode = stockInput;
 
 // 如果輸入的是中文（例如台積電），就轉成代號
-if (reverseStockNames[cleanInput]) {
-  pureCode = reverseStockNames[cleanInput];
+if (reverseStockNames[stockInput]) {
+  pureCode = reverseStockNames[stockInput];
 }
 
 // 股票名稱
-const stockName = stockNames[pureCode] || cleanInput;
+const stockName = stockNames[pureCode] || stockInput;
 
 const isStockQuery =
   /^\d{4,6}$/.test(pureCode) ||
