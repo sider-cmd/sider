@@ -212,7 +212,7 @@ const stockInput = analysisMatch
 
 const isAnalysisQuery = Boolean(analysisMatch);
 const isInstitutionalQuery = Boolean(institutionalMatch);
-
+const isMarginQuery = Boolean(marginMatch);
 let pureCode = stockInput;
 
 // 如果輸入的是中文（例如台積電），就轉成代號
