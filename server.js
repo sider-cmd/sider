@@ -231,11 +231,11 @@ console.log(
 let stockPrice = "查無市價";
 
 if (stockData.z && stockData.z !== "-") {
-  stockPrice = stockData.z;
+  stockPrice = Number(stockData.z);
 } else if (stockData.pz && stockData.pz !== "-") {
-  stockPrice = stockData.pz;
+  stockPrice = Number(stockData.pz);
 } else if (stockData.y && stockData.y !== "-") {
-  stockPrice = stockData.y;
+  stockPrice = Number(stockData.y);
 }
 
 
