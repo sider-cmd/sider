@@ -206,14 +206,13 @@ if (reverseStockNames[stockCode]) {
 
 const apiCode = `tse_${stockCode}.tw`;
 
-stockCode = `tse_${stockCode}.tw`;
 
 const stockName = stockNames[stockCode] || userMessage;
 
 console.log(`收到 LINE 訊息: ${userMessage}`);
 
 const response = await axios.get(
-`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${apiCode}`
+`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${stockCode}.tw`
 );
 
 const stockData = response.data.msgArray[0] || {};
