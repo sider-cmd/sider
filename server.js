@@ -215,7 +215,7 @@ const apiChannel = `tse_${pureCode}.tw`;
 console.log(`[系統日誌] 查詢股票: ${stockName} (${pureCode})`);
 
 const response = await axios.get(
-  `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${apiCode}`
+  `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${apiChannel}`
 );
 
 // 取得資料
