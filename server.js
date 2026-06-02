@@ -242,17 +242,14 @@ if (stockData.z && stockData.z !== "-") {
 // 2. 發送訊息給 LINE
 await client.replyMessage(event.replyToken, {
   type: 'text',
-  text: `📊 AI股票分析
+  text:
+`📊 AI股票分析
 
 股票：${stockName}
 
 目前股價：${stockPrice} 元
 
-代號：${pureCode}
-API代號：${apiCode}
-z：${stockData.z}
-pz：${stockData.pz}
-y：${stockData.y}
+股票代號：${pureCode}
 
 AI評分：70分
 主力訊號：2/3
