@@ -198,13 +198,15 @@ for (const key in stockNames) {
   reverseStockNames[stockNames[key]] = key;
 }
 
-let stockCode = userMessage.trim();
+const cleanInput = userMessage.trim(); 
+let pureCode = cleanInput;
 
-if (reverseStockNames[stockCode]) {
-  stockCode = reverseStockNames[stockCode];
+if (reverseStockNames[cleanInput]) {
+  pureCode = reverseStockNames[cleanInput];
 }
 
-const apiCode = `tse_${stockCode}.tw`;
+const stockName = stockNames[pureCode] || cleanInput;
+const apiCode = `tse_${pureCode}.tw`;
 
 
 const stockName = stockNames[stockCode] || userMessage;
