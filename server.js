@@ -203,8 +203,12 @@ if (reverseStockNames[stockId]) {
 }
 const stockName = stockNames[stockId] || "未知股票";
 console.log(`收到 LINE 訊息: ${userMessage}`);
-  const stockData = { price: Math.floor(Math.random() * 1000) + 100 };
-  const stockPrice = stockData.price || "查無資料";
+  const response = await axios.get(`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${stockId}.tw`);
+
+const stockData = response.data.msgArray[0] || {};
+
+const stockPrice = stockData.z || "查無資料";
+  
 await client.replyMessage(event.replyToken, {
   type: 'text',
 text: `
