@@ -200,8 +200,16 @@ for (const key in stockNames) {
 
 const cleanInput = userMessage.trim();
 const analysisMatch = cleanInput.match(/^分析\s*(.+)$/);
-const stockInput = analysisMatch ? analysisMatch[1].trim() : cleanInput;
+const institutionalMatch = cleanInput.match(/^法人\s*(.+)$/);
+
+const stockInput = analysisMatch
+  ? analysisMatch[1].trim()
+  : institutionalMatch
+  ? institutionalMatch[1].trim()
+  : cleanInput;
+
 const isAnalysisQuery = Boolean(analysisMatch);
+const isInstitutionalQuery = Boolean(institutionalMatch);
 
 let pureCode = stockInput;
 
