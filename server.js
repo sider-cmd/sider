@@ -206,24 +206,33 @@ if (reverseStockNames[cleanInput]) {
   pureCode = reverseStockNames[cleanInput];
 }
 
-// 安全做法：股票名稱直接等於 cleanInput（如果是輸入台積電就顯示台積電，輸入2330就顯示2330）
-const stockName = cleanInput; 
-const apiCode = `tse_${pureCode}.tw`;
+// 股票名稱
 const stockName = stockNames[pureCode] || cleanInput;
-const apiCode = `tse_${pureCode}.tw`;
 
+// API 專用格式
+const apiChannel = `tse_${pureCode}.tw`;
 
-const stockName = stockNames[stockCode] || userMessage;
-
-console.log(`收到 LINE 訊息: ${userMessage}`);
+console.log(`[系統日誌] 查詢股票: ${stockName} (${pureCode})`);
 
 const response = await axios.get(
-`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${stockCode}.tw`
+  `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${apiChannel}`
 );
 
-const stockData = response.data?.msgArray?.[0] || {};
-console.log("[系統日誌] 收到證交所資料:", JSON.stringify(stockData));
+// 取得資料
+const stockData = response.data.msgArray?.[0] || {};
 
+// 印出 API 原始資料
+console.log(
+  "[API 回傳資料]",
+  JSON.stringify(response.data, null, 2)
+);
+
+// 股價防呆
+const stockPrice =
+  stockData.z ||
+  stockData.pz ||
+  stockData.y ||
+  "查無市價";
 // 1. 智慧判定股價（徹底解決減號與空值問題）
 let stockPrice = "查無市價";
 if (stockData.z && stockData.z !== "-") {
