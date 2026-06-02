@@ -242,15 +242,7 @@ console.log(
 );
 
 // 股價防呆
-let stockPrice = "查無市價";
 
-if (stockData.z && stockData.z !== "-") {
-  stockPrice = Number(stockData.z);
-} else if (stockData.pz && stockData.pz !== "-") {
-  stockPrice = Number(stockData.pz);
-} else if (stockData.y && stockData.y !== "-") {
-  stockPrice = Number(stockData.y);
-}
 
 
 // 2. 發送訊息給 LINE
