@@ -217,6 +217,7 @@ const response = await axios.get(
 );
 
 const stockData = response.data.msgArray[0] || {};
+console.log(JSON.stringify(response.data, null, 2));
 console.log(response.data);
 
 const stockPrice =
