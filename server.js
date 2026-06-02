@@ -221,19 +221,15 @@ const stockData = response.data.msgArray[0] || {};
 console.log(JSON.stringify(response.data, null, 2));
 console.log(response.data);
 
-const stockPrice =
-  stockData.z ||
-  stockData.y ||
-  stockData.b ||
-  stockData.a ||
-  "查無資料";
-  
+let stockPrice = stockData.z;
+if (!stockPrice || stockPrice === "-" || stockPrice === "") {
+  stockPrice = stockData.pz || stockData.y || "查無市價";  
 await client.replyMessage(event.replyToken, {
   type: 'text',
 text: `
 📊 AI股票分析
 
-股票：${userMessage}
+股票：${stockName}
 
 目前股價：${stockPrice} 元
 
