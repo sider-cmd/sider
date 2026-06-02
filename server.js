@@ -217,7 +217,12 @@ const response = await axios.get(
 const stockData = response.data.msgArray[0] || {};
 console.log(response.data);
 
-const stockPrice = stockData.z || "查無資料";
+const stockPrice =
+  stockData.z ||
+  stockData.y ||
+  stockData.b ||
+  stockData.a ||
+  "查無資料";
   
 await client.replyMessage(event.replyToken, {
   type: 'text',
