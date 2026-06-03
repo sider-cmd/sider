@@ -851,6 +851,7 @@ async function handleEvent(event) {
 📦 查看備份：持股備份查看
 ♻️ 還原備份：持股還原
 🛡️ 風險控管：風險控管
+⚖️ 再平衡建議：再平衡 / 再平衡 18
 🧾 買進紀錄：買進 台積電 10 2380
 💸 賣出紀錄：賣出 台積電 5 2450
 💰 含費用：買進 台積電 10 2380 手續費20
@@ -2336,6 +2337,147 @@ ${suggestions.map((item, index) => `${index + 1}. ${item}`).join("\n")}${
         ? `\n\n提醒：${totals.failedCount} 檔即時報價查詢失敗，未列入風險計算。`
         : ""
     }`
+  });
+}
+
+const rebalanceMatch = userMessage.trim().match(/^再平衡(?:\s+(\d+(?:\.\d+)?))?$/);
+if (rebalanceMatch) {
+  const maxWeight = rebalanceMatch[1] ? Number(rebalanceMatch[1]) : 20;
+  if (maxWeight < 5 || maxWeight > 50) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目標上限請輸入 5～50 之間，例如：再平衡 18"
+    });
+  }
+
+  const portfolio = await getPortfolio(watchlistKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有持股資料，無法產生再平衡建議。請先輸入「匯入持股」建立資料。"
+    });
+  }
+
+  const snapshots = await getPortfolioSnapshots(entries, {
+    timeoutMs: 2500,
+    raceMs: 3500
+  });
+  const totals = portfolioTotals(snapshots);
+  if (totals.successful.length === 0 || totals.totalMarket <= 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前即時報價查詢失敗，暫時無法產生再平衡建議。請稍後再試。"
+    });
+  }
+
+  const withWeight = totals.successful
+    .map((item) => ({
+      ...item,
+      weight: (item.marketValue / totals.totalMarket) * 100
+    }))
+    .sort((a, b) => b.weight - a.weight);
+  const overweight = withWeight
+    .filter((item) => item.weight > maxWeight)
+    .map((item) => {
+      const targetMarketValue = totals.totalMarket * (maxWeight / 100);
+      const excessValue = item.marketValue - targetMarketValue;
+      const excessShares =
+        item.price > 0 ? Math.max(0, Math.floor(excessValue / item.price)) : 0;
+      return {
+        ...item,
+        excessValue,
+        excessShares
+      };
+    });
+  const addCandidates = withWeight
+    .filter((item) => item.weight < Math.max(5, maxWeight * 0.6) && item.profitPercent > -30)
+    .slice(0, 5);
+  const avoidAveraging = withWeight
+    .filter((item) => item.profitPercent <= -30)
+    .sort((a, b) => a.profitPercent - b.profitPercent)
+    .slice(0, 5);
+  const topWeights = withWeight
+    .slice(0, 5)
+    .map(
+      (item, index) =>
+        `${index + 1}. ${item.name}（${item.code}）：${formatPercent(item.weight)}%`
+    )
+    .join("\n");
+  const overweightText =
+    overweight.length > 0
+      ? overweight
+          .map(
+            (item, index) =>
+              `${index + 1}. ${item.name}（${item.code}）：${formatPercent(
+                item.weight
+              )}% → 目標 ${formatPercent(maxWeight)}%，超出約 ${formatMoney(
+                item.excessValue
+              )} 元${item.excessShares > 0 ? `（約 ${item.excessShares} 股）` : ""}`
+          )
+          .join("\n")
+      : `沒有持股超過 ${formatPercent(maxWeight)}%。`;
+  const addCandidateText =
+    addCandidates.length > 0
+      ? addCandidates
+          .map(
+            (item, index) =>
+              `${index + 1}. ${item.name}（${item.code}）：目前 ${formatPercent(
+                item.weight
+              )}%，報酬 ${profitSign(item.profitPercent)}${formatPercent(
+                item.profitPercent
+              )}%`
+          )
+          .join("\n")
+      : "目前沒有明顯低比重且未重虧的候選。";
+  const avoidText =
+    avoidAveraging.length > 0
+      ? avoidAveraging
+          .map(
+            (item, index) =>
+              `${index + 1}. ${item.name}（${item.code}）：${profitSign(
+                item.profitPercent
+              )}${formatPercent(item.profitPercent)}%`
+          )
+          .join("\n")
+      : "沒有持股虧損超過 30%。";
+  const suggestions = [
+    `單檔上限先抓 ${formatPercent(maxWeight)}%，超標部位暫停加碼。`,
+    "高虧損股先檢查基本面與停損計畫，不把攤平當第一反應。",
+    "若有新資金，可優先考慮低比重、未重虧、流動性較好的部位。"
+  ];
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `⚖️ 投組再平衡建議
+
+目標單檔上限：${formatPercent(maxWeight)}%
+持股檔數：${entries.length} 檔
+總市值：${formatMoney(totals.totalMarket)} 元
+未實現報酬率：${profitSign(totals.totalPercent)}${formatPercent(
+      totals.totalPercent
+    )}%
+
+目前前五大：
+${topWeights}
+
+超過目標上限：
+${overweightText}
+
+可觀察補比重候選：
+${addCandidateText}
+
+避免直接攤平：
+${avoidText}
+
+建議：
+${suggestions.map((item, index) => `${index + 1}. ${item}`).join("\n")}${
+      totals.failedCount > 0
+        ? `\n\n提醒：${totals.failedCount} 檔即時報價查詢失敗，未列入再平衡計算。`
+        : ""
+    }
+
+提醒：以上為比重試算，不是買賣建議。`
   });
 }
 
