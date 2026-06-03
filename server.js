@@ -61,6 +61,32 @@ const normalizeAlertDirection = (text = "") =>
 
 const alertDirectionLabel = (direction) => (direction === "below" ? "以下" : "以上");
 
+const fetchAlertYahooQuote = async (code, timeoutMs = 2500) => {
+  const cacheKey = `alert:${code}`;
+  const cached = quoteCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < 60 * 1000) {
+    return cached.meta;
+  }
+
+  for (const suffix of [".TW", ".TWO"]) {
+    try {
+      const response = await axios.get(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${code}${suffix}`,
+        { timeout: timeoutMs }
+      );
+      const meta = response.data.chart.result?.[0]?.meta;
+      if (meta) {
+        quoteCache.set(cacheKey, { meta, fetchedAt: Date.now() });
+        return meta;
+      }
+    } catch {
+      // Try the OTC suffix when the listed-market suffix has no result.
+    }
+  }
+
+  throw new Error("Yahoo 查無股票資料");
+};
+
 const getPortfolio = async (ownerKey) => {
   if (!hasPortfolioDb) {
     return portfolios.get(ownerKey) || new Map();
@@ -437,7 +463,7 @@ const checkAndPushPriceAlerts = async () => {
 
   for (const alert of alerts) {
     try {
-      const quote = await fetchYahooQuote(alert.code, 2500);
+      const quote = await fetchAlertYahooQuote(alert.code, 2500);
       const price = Number(quote.regularMarketPrice);
       if (!Number.isFinite(price)) {
         continue;
@@ -456,7 +482,7 @@ const checkAndPushPriceAlerts = async () => {
         type: "text",
         text: `🔔 價格提醒到價
 
-${stockNames[alert.code] || alert.code}（${alert.code}）
+股票代號：${alert.code}
 現價：${price} 元
 條件：${alert.targetPrice} 元 ${alertDirectionLabel(alert.direction)}
 
