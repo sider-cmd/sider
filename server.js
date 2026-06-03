@@ -850,6 +850,7 @@ async function handleEvent(event) {
 💾 持股備份：持股備份
 📦 查看備份：持股備份查看
 ♻️ 還原備份：持股還原
+🛡️ 風險控管：風險控管
 🧾 買進紀錄：買進 台積電 10 2380
 💸 賣出紀錄：賣出 台積電 5 2450
 💰 含費用：買進 台積電 10 2380 手續費20
@@ -2224,6 +2225,117 @@ ${topWeights || "暫無可計算資料"}${
     }
 
 提醒：買賣紀錄會納入手續費與交易稅；手動匯入的舊持股成本不會自動補歷史費用。`
+  });
+}
+
+if (userMessage.trim() === "風險控管" || userMessage.trim() === "持股風險") {
+  const portfolio = await getPortfolio(watchlistKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有持股資料，無法做風險控管。請先輸入「匯入持股」建立資料。"
+    });
+  }
+
+  const snapshots = await getPortfolioSnapshots(entries, {
+    timeoutMs: 2500,
+    raceMs: 3500
+  });
+  const totals = portfolioTotals(snapshots);
+  if (totals.successful.length === 0 || totals.totalMarket <= 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前即時報價查詢失敗，暫時無法計算風險控管。請稍後再試。"
+    });
+  }
+
+  const withWeight = totals.successful
+    .map((item) => ({
+      ...item,
+      weight: (item.marketValue / totals.totalMarket) * 100
+    }))
+    .sort((a, b) => b.weight - a.weight);
+  const topWeights = withWeight
+    .slice(0, 5)
+    .map(
+      (item, index) =>
+        `${index + 1}. ${item.name}（${item.code}）：${formatPercent(item.weight)}%`
+    )
+    .join("\n");
+  const overweight = withWeight
+    .filter((item) => item.weight >= 20)
+    .map((item) => `${item.name}（${item.code}）${formatPercent(item.weight)}%`);
+  const watchWeight = withWeight
+    .filter((item) => item.weight >= 15 && item.weight < 20)
+    .map((item) => `${item.name}（${item.code}）${formatPercent(item.weight)}%`);
+  const deepLosses = totals.successful
+    .filter((item) => item.profitPercent <= -30)
+    .sort((a, b) => a.profitPercent - b.profitPercent)
+    .map(
+      (item) =>
+        `${item.name}（${item.code}）：${profitSign(item.profitPercent)}${formatPercent(
+          item.profitPercent
+        )}%`
+    );
+  const mildLosses = totals.successful
+    .filter((item) => item.profitPercent <= -10 && item.profitPercent > -30)
+    .sort((a, b) => a.profitPercent - b.profitPercent)
+    .slice(0, 5)
+    .map(
+      (item) =>
+        `${item.name}（${item.code}）：${profitSign(item.profitPercent)}${formatPercent(
+          item.profitPercent
+        )}%`
+    );
+  const riskScore =
+    Math.min(40, overweight.length * 15 + watchWeight.length * 8) +
+    Math.min(40, deepLosses.length * 15 + mildLosses.length * 6) +
+    (totals.totalPercent < 0 ? 20 : totals.totalPercent < 5 ? 10 : 0);
+  const riskLevel =
+    riskScore >= 70 ? "高" : riskScore >= 40 ? "中" : "低";
+  const suggestions = [];
+  if (overweight.length > 0) {
+    suggestions.push("單一持股超過 20%，後續加碼前先檢查是否過度集中。");
+  }
+  if (deepLosses.length > 0) {
+    suggestions.push("有持股虧損超過 30%，建議重新檢查持股理由與停損計畫。");
+  }
+  if (totals.totalPercent > 10 && deepLosses.length > 0) {
+    suggestions.push("整體仍獲利但弱勢股拖累明顯，可分開檢視強勢股與虧損股。");
+  }
+  if (suggestions.length === 0) {
+    suggestions.push("目前風險結構相對穩定，持續追蹤集中度與重大虧損即可。");
+  }
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🛡️ 投資組合風險控管
+
+風險等級：${riskLevel}
+持股檔數：${entries.length} 檔
+總市值：${formatMoney(totals.totalMarket)} 元
+未實現報酬率：${profitSign(totals.totalPercent)}${formatPercent(
+      totals.totalPercent
+    )}%
+
+前五大持股比重：
+${topWeights}
+
+集中度提醒：
+${overweight.length > 0 ? overweight.join("\n") : "無單檔超過 20%"}
+${watchWeight.length > 0 ? `\n\n接近偏高：\n${watchWeight.join("\n")}` : ""}
+
+虧損風險：
+${deepLosses.length > 0 ? deepLosses.join("\n") : "無持股虧損超過 30%"}
+${mildLosses.length > 0 ? `\n\n虧損 10%～30%：\n${mildLosses.join("\n")}` : ""}
+
+建議：
+${suggestions.map((item, index) => `${index + 1}. ${item}`).join("\n")}${
+      totals.failedCount > 0
+        ? `\n\n提醒：${totals.failedCount} 檔即時報價查詢失敗，未列入風險計算。`
+        : ""
+    }`
   });
 }
 
