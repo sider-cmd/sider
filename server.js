@@ -325,6 +325,92 @@ const deleteDividendAt = async (ownerKey, index) => {
   return dividend;
 };
 
+const getAnnualDividendYear = (dividend) => {
+  if (dividend.code !== "TOTAL") {
+    return null;
+  }
+
+  const note = dividend.note || "";
+  const match = note.match(/(\d{4})/);
+  return match ? match[1] : null;
+};
+
+const getAnnualDividends = async (ownerKey) => {
+  if (!hasPortfolioDb) {
+    return (portfolioDividends.get(ownerKey) || []).filter(
+      (dividend) => getAnnualDividendYear(dividend) !== null
+    );
+  }
+
+  const response = await axios.get(dividendApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`,
+      code: "eq.TOTAL",
+      select: "id,code,amount,note,received_at",
+      order: "received_at.desc",
+      limit: 100
+    }
+  });
+
+  return (response.data || []).map((row) => ({
+    id: row.id,
+    code: row.code,
+    amount: Number(row.amount),
+    note: row.note || "",
+    receivedAt: row.received_at
+  }));
+};
+
+const deleteAnnualDividendByYear = async (ownerKey, year) => {
+  const yearText = String(year);
+  const annualDividends = await getAnnualDividends(ownerKey);
+  const matchedDividends = annualDividends.filter(
+    (dividend) => getAnnualDividendYear(dividend) === yearText
+  );
+
+  if (matchedDividends.length === 0) {
+    return [];
+  }
+
+  if (!hasPortfolioDb) {
+    const dividends = portfolioDividends.get(ownerKey) || [];
+    portfolioDividends.set(
+      ownerKey,
+      dividends.filter(
+        (dividend) =>
+          !(
+            dividend.code === "TOTAL" &&
+            getAnnualDividendYear(dividend) === yearText
+          )
+      )
+    );
+    return matchedDividends;
+  }
+
+  for (const dividend of matchedDividends) {
+    await axios.delete(dividendApiUrl(), {
+      headers: supabaseHeaders(),
+      params: {
+        owner_key: `eq.${ownerKey}`,
+        id: `eq.${dividend.id}`
+      }
+    });
+  }
+
+  return matchedDividends;
+};
+
+const recordAnnualDividend = async (ownerKey, year, amount, note) => {
+  const replaced = await deleteAnnualDividendByYear(ownerKey, year);
+  await recordDividend(ownerKey, {
+    code: "TOTAL",
+    amount,
+    note: note || `${year} 年度股利總額`
+  });
+  return replaced.length;
+};
+
 const getDividendTotal = async (ownerKey) => {
   if (!hasPortfolioDb) {
     const dividends = portfolioDividends.get(ownerKey) || [];
@@ -598,6 +684,8 @@ async function handleEvent(event) {
 💰 含稅費：賣出 台積電 5 2450 手續費20 交易稅36
 🎁 股息股利：股息 台積電 1000
 🎁 年度股利：年度股利 2026 3407
+📋 年度股利紀錄：年度股利紀錄
+🗑️ 刪除年度股利：年度股利刪除 2026
 🗑️ 刪除股息：股息刪除 5
 📜 交易紀錄：交易紀錄
 🎁 股息紀錄：股息紀錄
@@ -1436,6 +1524,71 @@ if (dividendMatch) {
   });
 }
 
+if (userMessage.trim() === "年度股利紀錄" || userMessage.trim() === "年度股利列表") {
+  const annualDividends = await getAnnualDividends(watchlistKey);
+  if (annualDividends.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有年度股利紀錄。可輸入：年度股利 2026 3407"
+    });
+  }
+
+  const rows = annualDividends
+    .map((dividend) => ({
+      ...dividend,
+      year: getAnnualDividendYear(dividend)
+    }))
+    .filter((dividend) => dividend.year)
+    .sort((a, b) => Number(b.year) - Number(a.year))
+    .map(
+      (dividend) =>
+        `${dividend.year}：${formatMoney(dividend.amount)} 元`
+    );
+  const total = annualDividends.reduce(
+    (sum, dividend) => sum + Number(dividend.amount || 0),
+    0
+  );
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🎁 年度股利紀錄
+
+${rows.join("\n")}
+
+年度股利合計：${formatMoney(total)} 元
+
+要刪除某年可輸入：年度股利刪除 2026`
+  });
+}
+
+const annualDividendDeleteMatch = userMessage
+  .trim()
+  .match(/^年度股利刪除\s*(\d{4})$/);
+if (annualDividendDeleteMatch) {
+  const year = annualDividendDeleteMatch[1];
+  const deleted = await deleteAnnualDividendByYear(watchlistKey, year);
+  if (deleted.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `找不到 ${year} 年度股利紀錄。\n請先輸入「年度股利紀錄」確認。`
+    });
+  }
+
+  const deletedTotal = deleted.reduce(
+    (sum, dividend) => sum + Number(dividend.amount || 0),
+    0
+  );
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🗑️ 已刪除 ${year} 年度股利
+刪除筆數：${deleted.length}
+金額合計：${formatMoney(deletedTotal)} 元
+
+輸入「年度股利紀錄」可確認最新年度股利。`
+  });
+}
+
 const annualDividendLines = userMessage
   .trim()
   .split(/\r?\n/)
@@ -1463,12 +1616,12 @@ if (
       continue;
     }
 
-    await recordDividend(watchlistKey, {
-      code: "TOTAL",
-      amount,
-      note
-    });
-    savedRows.push(`${year}：${formatMoney(amount)} 元`);
+    const replacedCount = await recordAnnualDividend(watchlistKey, year, amount, note);
+    savedRows.push(
+      `${year}：${formatMoney(amount)} 元${
+        replacedCount > 0 ? `（已覆蓋舊資料 ${replacedCount} 筆）` : ""
+      }`
+    );
   }
 
   return client.replyMessage(event.replyToken, {
@@ -1500,18 +1653,21 @@ if (annualDividendMatch) {
     });
   }
 
-  await recordDividend(watchlistKey, {
-    code: "TOTAL",
+  const replacedCount = await recordAnnualDividend(
+    watchlistKey,
+    year,
     amount,
     note
-  });
+  );
 
   return client.replyMessage(event.replyToken, {
     type: "text",
-    text: `🎁 已記錄年度股利
+    text: `🎁 已${replacedCount > 0 ? "更新" : "記錄"}年度股利
 年度：${year}
 金額：${formatMoney(amount)} 元
-備註：${note}`
+備註：${note}${
+      replacedCount > 0 ? `\n已覆蓋舊資料：${replacedCount} 筆` : ""
+    }`
   });
 }
 
