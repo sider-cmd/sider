@@ -677,7 +677,8 @@ const fetchYahooQuote = async (code) => {
   for (const suffix of [".TW", ".TWO"]) {
     try {
       const response = await axios.get(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${code}${suffix}`
+        `https://query1.finance.yahoo.com/v8/finance/chart/${code}${suffix}`,
+        { timeout: 5000 }
       );
       const meta = response.data.chart.result?.[0]?.meta;
       if (meta) {
@@ -692,40 +693,57 @@ const fetchYahooQuote = async (code) => {
 
 const getPortfolioSnapshots = async (entries) =>
   Promise.all(
-    entries.map(async ([code, position]) => {
-      try {
-        const quote = await fetchYahooQuote(code);
-        const price = Number(quote.regularMarketPrice);
-        if (!Number.isFinite(price)) {
-          throw new Error("查無即時股價");
-        }
+    entries.map(async ([code, position]) =>
+      Promise.race([
+        (async () => {
+          try {
+            const quote = await fetchYahooQuote(code);
+            const price = Number(quote.regularMarketPrice);
+            if (!Number.isFinite(price)) {
+              throw new Error("查無即時股價");
+            }
 
-        const costValue = position.averageCost * position.shares;
-        const marketValue = price * position.shares;
-        const profit = marketValue - costValue;
-        const profitPercent = (profit / costValue) * 100;
+            const costValue = position.averageCost * position.shares;
+            const marketValue = price * position.shares;
+            const profit = marketValue - costValue;
+            const profitPercent = (profit / costValue) * 100;
 
-        return {
-          code,
-          name: stockNames[code] || code,
-          shares: position.shares,
-          averageCost: position.averageCost,
-          price,
-          costValue,
-          marketValue,
-          profit,
-          profitPercent
-        };
-      } catch {
-        return {
-          code,
-          name: stockNames[code] || code,
-          shares: position.shares,
-          averageCost: position.averageCost,
-          error: true
-        };
-      }
-    })
+            return {
+              code,
+              name: stockNames[code] || code,
+              shares: position.shares,
+              averageCost: position.averageCost,
+              price,
+              costValue,
+              marketValue,
+              profit,
+              profitPercent
+            };
+          } catch {
+            return {
+              code,
+              name: stockNames[code] || code,
+              shares: position.shares,
+              averageCost: position.averageCost,
+              error: true
+            };
+          }
+        })(),
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                code,
+                name: stockNames[code] || code,
+                shares: position.shares,
+                averageCost: position.averageCost,
+                error: true
+              }),
+            7000
+          )
+        )
+      ])
+    )
   );
 
 const formatMoney = (value) => Number(value).toFixed(0);
