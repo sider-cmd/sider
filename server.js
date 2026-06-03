@@ -1380,6 +1380,55 @@ if (dividendMatch) {
   });
 }
 
+const annualDividendLines = userMessage
+  .trim()
+  .split(/\r?\n/)
+  .map((line) => line.trim())
+  .filter(Boolean);
+if (
+  annualDividendLines.length > 1 &&
+  annualDividendLines.every((line) => /^年度股利\s*\d{4}\s+\d+(?:\.\d+)?/.test(line))
+) {
+  const invalidLines = [];
+  const savedRows = [];
+
+  for (const line of annualDividendLines) {
+    const match = line.match(/^年度股利\s*(\d{4})\s+(\d+(?:\.\d+)?)(?:\s+(.+))?$/);
+    if (!match) {
+      invalidLines.push(line);
+      continue;
+    }
+
+    const year = match[1];
+    const amount = Number(match[2]);
+    const note = match[3] || `${year} 年度股利總額`;
+    if (amount <= 0) {
+      invalidLines.push(line);
+      continue;
+    }
+
+    await recordDividend(watchlistKey, {
+      code: "TOTAL",
+      amount,
+      note
+    });
+    savedRows.push(`${year}：${formatMoney(amount)} 元`);
+  }
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🎁 已批次記錄年度股利
+
+${savedRows.join("\n")}${
+      invalidLines.length > 0
+        ? `\n\n⚠️ ${invalidLines.length} 行格式錯誤，未匯入。`
+        : ""
+    }
+
+輸入「股息紀錄」可查看累計股息/股利。`
+  });
+}
+
 const annualDividendMatch = userMessage
   .trim()
   .match(/^年度股利\s*(\d{4})\s+(\d+(?:\.\d+)?)(?:\s+(.+))?$/);
