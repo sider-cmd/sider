@@ -53,6 +53,8 @@ const parseOptionalMoney = (text, label) => {
 const estimateBuyFee = (amount) => Math.round(amount * 0.001425);
 const estimateSellFee = (amount) => Math.round(amount * 0.001425);
 const estimateSellTax = (amount) => Math.round(amount * 0.003);
+const ALERT_CHECK_INTERVAL_MS =
+  Number(process.env.ALERT_CHECK_INTERVAL_MS) || 10 * 60 * 1000;
 
 const normalizeAlertDirection = (text = "") =>
   text.includes("下") || text.toLowerCase().includes("below") ? "below" : "above";
@@ -343,6 +345,64 @@ const getPriceAlerts = async (ownerKey) => {
   }));
 };
 
+const getAllActivePriceAlerts = async () => {
+  if (!hasPortfolioDb) {
+    return [...priceAlerts.entries()].flatMap(([ownerKey, alerts]) =>
+      alerts
+        .filter((alert) => alert.active !== false)
+        .map((alert) => ({ ...alert, ownerKey }))
+    );
+  }
+
+  const response = await axios.get(alertApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      active: "eq.true",
+      select: "owner_key,code,direction,target_price,created_at",
+      order: "created_at.asc"
+    }
+  });
+
+  return (response.data || []).map((row) => ({
+    ownerKey: row.owner_key,
+    code: row.code,
+    direction: row.direction,
+    targetPrice: Number(row.target_price),
+    createdAt: row.created_at
+  }));
+};
+
+const deactivatePriceAlert = async (ownerKey, code, direction) => {
+  if (!hasPortfolioDb) {
+    const alerts = priceAlerts.get(ownerKey) || [];
+    priceAlerts.set(
+      ownerKey,
+      alerts.map((alert) =>
+        alert.code === code && alert.direction === direction
+          ? { ...alert, active: false, lastTriggeredAt: new Date().toISOString() }
+          : alert
+      )
+    );
+    return;
+  }
+
+  await axios.patch(
+    alertApiUrl(),
+    {
+      active: false,
+      last_triggered_at: new Date().toISOString()
+    },
+    {
+      headers: supabaseHeaders(),
+      params: {
+        owner_key: `eq.${ownerKey}`,
+        code: `eq.${code}`,
+        direction: `eq.${direction}`
+      }
+    }
+  );
+};
+
 const deletePriceAlert = async (ownerKey, code) => {
   if (!hasPortfolioDb) {
     const alerts = priceAlerts.get(ownerKey) || [];
@@ -360,6 +420,58 @@ const deletePriceAlert = async (ownerKey, code) => {
       code: `eq.${code}`
     }
   });
+};
+
+const checkAndPushPriceAlerts = async () => {
+  if (!hasPortfolioDb) {
+    console.log("Auto price alerts skipped: database is not enabled");
+    return;
+  }
+
+  const alerts = await getAllActivePriceAlerts();
+  if (alerts.length === 0) {
+    return;
+  }
+
+  console.log(`Checking ${alerts.length} price alerts`);
+
+  for (const alert of alerts) {
+    try {
+      const quote = await fetchYahooQuote(alert.code, 2500);
+      const price = Number(quote.regularMarketPrice);
+      if (!Number.isFinite(price)) {
+        continue;
+      }
+
+      const triggered =
+        alert.direction === "below"
+          ? price <= alert.targetPrice
+          : price >= alert.targetPrice;
+
+      if (!triggered) {
+        continue;
+      }
+
+      await client.pushMessage(alert.ownerKey, {
+        type: "text",
+        text: `🔔 價格提醒到價
+
+${stockNames[alert.code] || alert.code}（${alert.code}）
+現價：${price} 元
+條件：${alert.targetPrice} 元 ${alertDirectionLabel(alert.direction)}
+
+此提醒已自動關閉；如需再次提醒，請重新設定。`
+      });
+
+      await deactivatePriceAlert(alert.ownerKey, alert.code, alert.direction);
+    } catch (error) {
+      console.error("自動價格提醒檢查失敗:", {
+        ownerKey: alert.ownerKey,
+        code: alert.code,
+        error: error.message
+      });
+    }
+  }
 };
 
 app.get('/audio', async (req, res) => {
@@ -1038,12 +1150,16 @@ if (userMessage.trim() === "檢查提醒") {
             ? price <= alert.targetPrice
             : price >= alert.targetPrice;
 
+        if (triggered) {
+          await deactivatePriceAlert(watchlistKey, alert.code, alert.direction);
+        }
+
         return `${triggered ? "✅ 到價" : "⏳ 未到"} ${stockNames[alert.code] || alert.code}（${
           alert.code
         }）
 現價：${price} 元｜條件：${alert.targetPrice} 元 ${alertDirectionLabel(
           alert.direction
-        )}`;
+        )}${triggered ? "\n此提醒已自動關閉。" : ""}`;
       } catch {
         return `⚠️ ${stockNames[alert.code] || alert.code}（${alert.code}）：報價查詢失敗`;
       }
@@ -1902,6 +2018,16 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+app.get('/alerts/check', async (req, res) => {
+  try {
+    await checkAndPushPriceAlerts();
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("手動觸發價格提醒失敗:", error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
@@ -1909,5 +2035,19 @@ app.get('*', (req, res) => {
 // =================【4. 啟動伺服器】=================
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);      
+  console.log(`Server running on port ${PORT}`);
+  if (hasPortfolioDb) {
+    console.log(
+      `Auto price alerts enabled. Interval: ${Math.round(
+        ALERT_CHECK_INTERVAL_MS / 1000
+      )} seconds`
+    );
+    setInterval(() => {
+      checkAndPushPriceAlerts().catch((error) => {
+        console.error("自動價格提醒排程失敗:", error);
+      });
+    }, ALERT_CHECK_INTERVAL_MS);
+  } else {
+    console.log("Auto price alerts disabled: database is not enabled");
+  }
 });
