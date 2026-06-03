@@ -259,6 +259,49 @@ const deleteTradeAt = async (ownerKey, index) => {
   return trade;
 };
 
+const rollbackBuyTradePosition = async (ownerKey, trade) => {
+  if (!trade || trade.type !== "buy") {
+    return { rolledBack: false, reason: "只支援買進交易回復" };
+  }
+
+  const portfolio = await getPortfolio(ownerKey);
+  const current = portfolio.get(trade.code);
+  if (!current) {
+    return { rolledBack: false, reason: "目前沒有這檔持股可回復" };
+  }
+
+  const remainingShares = Number(current.shares) - Number(trade.shares);
+  if (remainingShares < 0) {
+    return { rolledBack: false, reason: "目前持股少於要回復的買進股數" };
+  }
+
+  if (remainingShares === 0) {
+    await deletePortfolioPosition(ownerKey, trade.code);
+    return {
+      rolledBack: true,
+      shares: 0,
+      averageCost: 0
+    };
+  }
+
+  const currentCost = Number(current.shares) * Number(current.averageCost);
+  const removedCost =
+    Number(trade.shares) * Number(trade.price) + Number(trade.fee || 0);
+  const nextCost = Math.max(0, currentCost - removedCost);
+  const nextAverageCost = Number((nextCost / remainingShares).toFixed(2));
+
+  await savePortfolioPosition(ownerKey, trade.code, {
+    shares: remainingShares,
+    averageCost: nextAverageCost
+  });
+
+  return {
+    rolledBack: true,
+    shares: remainingShares,
+    averageCost: nextAverageCost
+  };
+};
+
 const getRealizedProfit = async (ownerKey) => {
   if (!hasPortfolioDb) {
     const trades = portfolioTrades.get(ownerKey) || [];
@@ -709,6 +752,7 @@ async function handleEvent(event) {
 💰 含費用：買進 台積電 10 2380 手續費20
 💰 含稅費：賣出 台積電 5 2450 手續費20 交易稅36
 🗑️ 刪除交易：交易刪除 1
+↩️ 刪除並回復買進：交易刪除回復 1
 🎁 股息股利：股息 台積電 1000
 🎁 年度股利：年度股利 2026 3407
 📋 年度股利紀錄：年度股利紀錄
@@ -1454,9 +1498,59 @@ if (sellTradeMatch) {
   });
 }
 
+const tradeDeleteRollbackMatch = userMessage
+  .trim()
+  .match(/^交易刪除回復\s*(\d+)$/);
+if (tradeDeleteRollbackMatch) {
+  const index = Number(tradeDeleteRollbackMatch[1]);
+  const trades = await getTrades(watchlistKey);
+  const trade = trades[index - 1];
+  if (!trade) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `找不到第 ${index} 筆交易紀錄。\n請先輸入「交易紀錄」確認序號。`
+    });
+  }
+
+  if (trade.type !== "buy") {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前只支援買進交易的持股回復。\n賣出交易請用「交易刪除 1」只刪紀錄，再手動調整持股。"
+    });
+  }
+
+  const rollback = await rollbackBuyTradePosition(watchlistKey, trade);
+  if (!rollback.rolledBack) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `無法回復持股：${rollback.reason}\n交易紀錄尚未刪除。`
+    });
+  }
+
+  await deleteTradeAt(watchlistKey, index);
+
+  const holdingText =
+    rollback.shares > 0
+      ? `目前持股：${formatMoney(rollback.shares)} 股\n新平均成本：${rollback.averageCost} 元`
+      : "目前持股：已歸零，已移除此檔持股";
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `↩️ 已刪除交易並回復持股
+第 ${index} 筆：買進 ${stockNames[trade.code] || trade.code}（${trade.code}）
+回復股數：${formatMoney(trade.shares)} 股
+原買進價格：${trade.price} 元
+手續費：${formatMoney(trade.fee || 0)} 元
+
+${holdingText}
+
+輸入「我的持股」可確認最新持股。`
+  });
+}
+
 const tradeDeleteMatch = userMessage
   .trim()
-  .match(/^交易刪除\s*(\d+)$/);
+  .match(/^交易刪除(?!回復)\s*(\d+)$/);
 if (tradeDeleteMatch) {
   const index = Number(tradeDeleteMatch[1]);
   const trade = await deleteTradeAt(watchlistKey, index);
