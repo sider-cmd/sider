@@ -285,18 +285,44 @@ const getDividends = async (ownerKey) => {
     headers: supabaseHeaders(),
     params: {
       owner_key: `eq.${ownerKey}`,
-      select: "code,amount,note,received_at",
+      select: "id,code,amount,note,received_at",
       order: "received_at.desc",
       limit: 20
     }
   });
 
   return (response.data || []).map((row) => ({
+    id: row.id,
     code: row.code,
     amount: Number(row.amount),
     note: row.note || "",
     receivedAt: row.received_at
   }));
+};
+
+const deleteDividendAt = async (ownerKey, index) => {
+  const dividends = await getDividends(ownerKey);
+  const dividend = dividends[index - 1];
+  if (!dividend) {
+    return null;
+  }
+
+  if (!hasPortfolioDb) {
+    const savedDividends = portfolioDividends.get(ownerKey) || [];
+    savedDividends.splice(index - 1, 1);
+    portfolioDividends.set(ownerKey, savedDividends);
+    return dividend;
+  }
+
+  await axios.delete(dividendApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`,
+      id: `eq.${dividend.id}`
+    }
+  });
+
+  return dividend;
 };
 
 const getDividendTotal = async (ownerKey) => {
@@ -572,6 +598,7 @@ async function handleEvent(event) {
 💰 含稅費：賣出 台積電 5 2450 手續費20 交易稅36
 🎁 股息股利：股息 台積電 1000
 🎁 年度股利：年度股利 2026 3407
+🗑️ 刪除股息：股息刪除 5
 📜 交易紀錄：交易紀錄
 🎁 股息紀錄：股息紀錄
 💰 已實現損益：已實現損益
@@ -1355,9 +1382,38 @@ ${date}`;
   });
 }
 
+const dividendDeleteMatch = userMessage
+  .trim()
+  .match(/^(股息刪除|股利刪除|刪除股息|刪除股利)\s*(\d+)$/);
+if (dividendDeleteMatch) {
+  const index = Number(dividendDeleteMatch[2]);
+  const dividend = await deleteDividendAt(watchlistKey, index);
+  if (!dividend) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `找不到第 ${index} 筆股息/股利紀錄。\n請先輸入「股息紀錄」確認序號。`
+    });
+  }
+
+  const dividendName =
+    dividend.code === "TOTAL"
+      ? "年度股利總額"
+      : `${stockNames[dividend.code] || dividend.code}（${dividend.code}）`;
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🗑️ 已刪除股息/股利紀錄
+第 ${index} 筆：${dividendName}
+金額：${formatMoney(dividend.amount)} 元
+備註：${dividend.note || "股息"}
+
+輸入「股息紀錄」可確認最新總額。`
+  });
+}
+
 const dividendMatch = userMessage
   .trim()
-  .match(/^(股息|股利)\s*(\S+)\s+(\d+(?:\.\d+)?)(?:\s+(.+))?$/);
+  .match(/^(股息|股利)(?!刪除)\s+(\S+)\s+(\d+(?:\.\d+)?)(?:\s+(.+))?$/);
 if (dividendMatch) {
   const code = resolveStockCode(dividendMatch[2]);
   const amount = Number(dividendMatch[3]);
