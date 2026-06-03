@@ -215,13 +215,14 @@ const getTrades = async (ownerKey) => {
     headers: supabaseHeaders(),
     params: {
       owner_key: `eq.${ownerKey}`,
-      select: "code,trade_type,shares,price,fee,tax,realized_profit,traded_at",
+      select: "id,code,trade_type,shares,price,fee,tax,realized_profit,traded_at",
       order: "traded_at.desc",
       limit: 20
     }
   });
 
   return (response.data || []).map((row) => ({
+    id: row.id,
     code: row.code,
     type: row.trade_type,
     shares: Number(row.shares),
@@ -231,6 +232,31 @@ const getTrades = async (ownerKey) => {
     realizedProfit: Number(row.realized_profit || 0),
     tradedAt: row.traded_at
   }));
+};
+
+const deleteTradeAt = async (ownerKey, index) => {
+  const trades = await getTrades(ownerKey);
+  const trade = trades[index - 1];
+  if (!trade) {
+    return null;
+  }
+
+  if (!hasPortfolioDb) {
+    const savedTrades = portfolioTrades.get(ownerKey) || [];
+    savedTrades.splice(index - 1, 1);
+    portfolioTrades.set(ownerKey, savedTrades);
+    return trade;
+  }
+
+  await axios.delete(tradeApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`,
+      id: `eq.${trade.id}`
+    }
+  });
+
+  return trade;
 };
 
 const getRealizedProfit = async (ownerKey) => {
@@ -682,6 +708,7 @@ async function handleEvent(event) {
 💸 賣出紀錄：賣出 台積電 5 2450
 💰 含費用：買進 台積電 10 2380 手續費20
 💰 含稅費：賣出 台積電 5 2450 手續費20 交易稅36
+🗑️ 刪除交易：交易刪除 1
 🎁 股息股利：股息 台積電 1000
 🎁 年度股利：年度股利 2026 3407
 📋 年度股利紀錄：年度股利紀錄
@@ -1424,6 +1451,41 @@ if (sellTradeMatch) {
 手續費：${fee} 元｜交易稅：${tax} 元
 已實現損益：${profitSign(realizedProfit)}${formatMoney(realizedProfit)} 元
 剩餘持股：${remainingShares} 股`
+  });
+}
+
+const tradeDeleteMatch = userMessage
+  .trim()
+  .match(/^交易刪除\s*(\d+)$/);
+if (tradeDeleteMatch) {
+  const index = Number(tradeDeleteMatch[1]);
+  const trade = await deleteTradeAt(watchlistKey, index);
+  if (!trade) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `找不到第 ${index} 筆交易紀錄。\n請先輸入「交易紀錄」確認序號。`
+    });
+  }
+
+  const typeLabel = trade.type === "buy" ? "買進" : "賣出";
+  const realized =
+    trade.type === "sell"
+      ? `\n已實現損益：${profitSign(trade.realizedProfit)}${formatMoney(
+          trade.realizedProfit
+        )} 元`
+      : "";
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🗑️ 已刪除交易紀錄
+第 ${index} 筆：${typeLabel} ${stockNames[trade.code] || trade.code}（${trade.code}）
+股數：${formatMoney(trade.shares)} 股
+價格：${trade.price} 元
+手續費：${formatMoney(trade.fee || 0)} 元
+交易稅：${formatMoney(trade.tax || 0)} 元${realized}
+
+提醒：這只刪除交易歷史，不會自動回復持股股數。
+輸入「交易紀錄」可確認最新列表。`
   });
 }
 
