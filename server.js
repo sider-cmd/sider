@@ -526,6 +526,76 @@ const fetchYahooQuote = async (code) => {
   throw new Error("Yahoo 查無股票資料");
 };
 
+const getPortfolioSnapshots = async (entries) =>
+  Promise.all(
+    entries.map(async ([code, position]) => {
+      try {
+        const quote = await fetchYahooQuote(code);
+        const price = Number(quote.regularMarketPrice);
+        if (!Number.isFinite(price)) {
+          throw new Error("查無即時股價");
+        }
+
+        const costValue = position.averageCost * position.shares;
+        const marketValue = price * position.shares;
+        const profit = marketValue - costValue;
+        const profitPercent = (profit / costValue) * 100;
+
+        return {
+          code,
+          name: stockNames[code] || code,
+          shares: position.shares,
+          averageCost: position.averageCost,
+          price,
+          costValue,
+          marketValue,
+          profit,
+          profitPercent
+        };
+      } catch {
+        return {
+          code,
+          name: stockNames[code] || code,
+          shares: position.shares,
+          averageCost: position.averageCost,
+          error: true
+        };
+      }
+    })
+  );
+
+const formatMoney = (value) => Number(value).toFixed(0);
+const formatPercent = (value) => Number(value).toFixed(2);
+const profitSign = (value) => (value > 0 ? "+" : "");
+
+const formatPortfolioSnapshot = (item) => {
+  if (item.error) {
+    return `${item.name}（${item.code}）：即時損益查詢失敗`;
+  }
+
+  const sign = profitSign(item.profit);
+  return `${item.name}（${item.code}）
+持有：${item.shares} 股｜成本：${item.averageCost} 元
+現價：${item.price} 元｜損益：${sign}${formatMoney(item.profit)} 元（${sign}${formatPercent(item.profitPercent)}%）`;
+};
+
+const portfolioTotals = (snapshots) => {
+  const successful = snapshots.filter((item) => !item.error);
+  const totalCost = successful.reduce((sum, item) => sum + item.costValue, 0);
+  const totalMarket = successful.reduce((sum, item) => sum + item.marketValue, 0);
+  const totalProfit = totalMarket - totalCost;
+  const totalPercent = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
+
+  return {
+    successful,
+    failedCount: snapshots.length - successful.length,
+    totalCost,
+    totalMarket,
+    totalProfit,
+    totalPercent
+  };
+};
+
 const portfolioImportMatch = userMessage.trim().match(/^匯入持股\s*\n([\s\S]+)$/);
 if (portfolioImportMatch) {
   const lines = portfolioImportMatch[1]
@@ -609,6 +679,187 @@ if (portfolioRemoveMatch) {
   });
 }
 
+if (userMessage.trim() === "持股總覽" || userMessage.trim() === "資產總覽") {
+  const portfolio = await getPortfolio(watchlistKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有持股資料。輸入「匯入持股」即可建立你的持股資料庫。"
+    });
+  }
+
+  const snapshots = await getPortfolioSnapshots(entries);
+  const totals = portfolioTotals(snapshots);
+  const sign = profitSign(totals.totalProfit);
+  const topWeights = totals.successful
+    .sort((a, b) => b.marketValue - a.marketValue)
+    .slice(0, 5)
+    .map(
+      (item, index) =>
+        `${index + 1}. ${item.name}（${item.code}）：${formatPercent(
+          (item.marketValue / totals.totalMarket) * 100
+        )}%`
+    )
+    .join("\n");
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `📊 持股總覽
+
+持股檔數：${entries.length} 檔
+總成本：${formatMoney(totals.totalCost)} 元
+總市值：${formatMoney(totals.totalMarket)} 元
+總損益：${sign}${formatMoney(totals.totalProfit)} 元
+總報酬率：${sign}${formatPercent(totals.totalPercent)}%
+
+前五大持股比重：
+${topWeights || "暫無可計算資料"}${
+      totals.failedCount > 0
+        ? `\n\n提醒：${totals.failedCount} 檔即時報價查詢失敗，未列入總覽。`
+        : ""
+    }
+
+提醒：此為試算資訊，不含手續費與交易稅。`
+  });
+}
+
+if (userMessage.trim() === "損益排行" || userMessage.trim() === "持股排行") {
+  const portfolio = await getPortfolio(watchlistKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有持股資料，無法建立損益排行。"
+    });
+  }
+
+  const snapshots = await getPortfolioSnapshots(entries);
+  const totals = portfolioTotals(snapshots);
+  const winners = [...totals.successful]
+    .sort((a, b) => b.profit - a.profit)
+    .slice(0, 5)
+    .map(
+      (item, index) =>
+        `${index + 1}. ${item.name}（${item.code}）：${profitSign(item.profit)}${formatMoney(
+          item.profit
+        )} 元（${profitSign(item.profitPercent)}${formatPercent(item.profitPercent)}%）`
+    )
+    .join("\n");
+  const losers = [...totals.successful]
+    .sort((a, b) => a.profit - b.profit)
+    .slice(0, 5)
+    .map(
+      (item, index) =>
+        `${index + 1}. ${item.name}（${item.code}）：${profitSign(item.profit)}${formatMoney(
+          item.profit
+        )} 元（${profitSign(item.profitPercent)}${formatPercent(item.profitPercent)}%）`
+    )
+    .join("\n");
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🏆 損益排行
+
+賺最多前 5 名：
+${winners || "暫無可計算資料"}
+
+賠最多前 5 名：
+${losers || "暫無可計算資料"}${
+      totals.failedCount > 0
+        ? `\n\n提醒：${totals.failedCount} 檔即時報價查詢失敗，未列入排行。`
+        : ""
+    }`
+  });
+}
+
+const singlePortfolioMatch = userMessage.trim().match(/^持股\s*(\S+)$/);
+if (
+  singlePortfolioMatch &&
+  !["持股", "持股總覽", "持股排行"].includes(userMessage.trim())
+) {
+  const portfolio = await getPortfolio(watchlistKey);
+  const code = resolveStockCode(singlePortfolioMatch[1]);
+  const position = portfolio.get(code);
+
+  if (!position) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `目前沒有 ${stockNames[code] || code}（${code}）的持股資料。`
+    });
+  }
+
+  const [snapshot] = await getPortfolioSnapshots([[code, position]]);
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🔎 單一持股查詢\n\n${formatPortfolioSnapshot(snapshot)}`
+  });
+}
+
+if (userMessage.trim() === "健檢持股" || userMessage.trim() === "AI持股健檢") {
+  const portfolio = await getPortfolio(watchlistKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有持股資料，無法健檢。請先輸入「匯入持股」建立資料。"
+    });
+  }
+
+  const snapshots = await getPortfolioSnapshots(entries);
+  const totals = portfolioTotals(snapshots);
+  const holdingLines = totals.successful
+    .map(
+      (item) =>
+        `${item.name}(${item.code}) 持有${item.shares}股 成本${item.averageCost} 現價${item.price} 市值${formatMoney(
+          item.marketValue
+        )} 損益${profitSign(item.profit)}${formatMoney(item.profit)} 報酬${profitSign(
+          item.profitPercent
+        )}${formatPercent(item.profitPercent)}% 比重${formatPercent(
+          (item.marketValue / totals.totalMarket) * 100
+        )}%`
+    )
+    .join("\n");
+
+  const healthPrompt = `請根據以下台股持股資料做繁體中文持股健檢。
+請不要保證獲利，不要使用 Markdown 粗體符號。
+請用 5 點回答：
+1. 整體損益狀態
+2. 持股集中度
+3. 需要優先留意的持股
+4. 可觀察的調整方向
+5. 風險提醒
+
+總成本：${formatMoney(totals.totalCost)}
+總市值：${formatMoney(totals.totalMarket)}
+總損益：${profitSign(totals.totalProfit)}${formatMoney(totals.totalProfit)}
+總報酬率：${profitSign(totals.totalPercent)}${formatPercent(totals.totalPercent)}%
+
+持股明細：
+${holdingLines}`;
+
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "你是台股持股健檢助理。根據使用者提供的持股數據分析，使用繁體中文，務實、精簡、不做買賣保證。"
+      },
+      {
+        role: "user",
+        content: healthPrompt
+      }
+    ],
+    max_tokens: 700
+  });
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🧠 AI 持股健檢\n\n${completion.choices[0].message.content.trim()}`
+  });
+}
+
 if (userMessage.trim() === "我的持股" || userMessage.trim() === "持股") {
   const portfolio = await getPortfolio(watchlistKey);
   const entries = [...portfolio.entries()];
@@ -619,28 +870,8 @@ if (userMessage.trim() === "我的持股" || userMessage.trim() === "持股") {
     });
   }
 
-  const rows = await Promise.all(
-    entries.map(async ([code, position]) => {
-      try {
-        const quote = await fetchYahooQuote(code);
-        const price = quote.regularMarketPrice;
-        if (!Number.isFinite(price)) {
-          throw new Error("查無即時股價");
-        }
-
-        const profit = (price - position.averageCost) * position.shares;
-        const profitPercent =
-          ((price - position.averageCost) / position.averageCost) * 100;
-        const sign = profit > 0 ? "+" : "";
-
-        return `${stockNames[code] || code}（${code}）
-持有：${position.shares} 股｜成本：${position.averageCost} 元
-現價：${price} 元｜損益：${sign}${profit.toFixed(0)} 元（${sign}${profitPercent.toFixed(2)}%）`;
-      } catch {
-        return `${stockNames[code] || code}（${code}）：即時損益查詢失敗`;
-      }
-    })
-  );
+  const snapshots = await getPortfolioSnapshots(entries);
+  const rows = snapshots.map(formatPortfolioSnapshot);
 
   return client.replyMessage(event.replyToken, {
     type: "text",
