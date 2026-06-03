@@ -581,6 +581,10 @@ async function handleEvent(event) {
 🔎 檢查提醒：檢查提醒
 🗑️ 移除提醒：提醒-台積電
 
+🗓️ 今日總結：今日總結
+📌 持股日報：持股日報
+🌇 盤後總結：盤後總結
+
 🌐 大盤行情：大盤
 🧠 大盤分析：分析大盤
 🔊 語音播報：語音大盤`
@@ -1422,6 +1426,131 @@ if (userMessage.trim() === "已實現損益") {
 合計已實現總收益：${profitSign(total)}${formatMoney(total)} 元
 
 提醒：買賣試算已納入手續費與交易稅；稅費可手動輸入，未輸入時使用預設估算。`
+  });
+}
+
+if (
+  userMessage.trim() === "今日總結" ||
+  userMessage.trim() === "持股日報" ||
+  userMessage.trim() === "盤後總結"
+) {
+  const portfolio = await getPortfolio(watchlistKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有持股資料，無法產生今日總結。請先輸入「匯入持股」建立資料。"
+    });
+  }
+
+  const snapshots = await getPortfolioSnapshots(entries, {
+    timeoutMs: 2500,
+    raceMs: 3500
+  });
+  const totals = portfolioTotals(snapshots);
+  const realizedProfit = await getRealizedProfit(watchlistKey);
+  const dividendTotal = await getDividendTotal(watchlistKey);
+  const alerts = await getPriceAlerts(watchlistKey);
+  const totalReturn = totals.totalProfit + realizedProfit + dividendTotal;
+
+  const strongest = [...totals.successful]
+    .sort((a, b) => b.profitPercent - a.profitPercent)
+    .slice(0, 3);
+  const weakest = [...totals.successful]
+    .sort((a, b) => a.profitPercent - b.profitPercent)
+    .slice(0, 3);
+
+  const formatDailyRank = (items) =>
+    items.length > 0
+      ? items
+          .map(
+            (item, index) =>
+              `${index + 1}. ${item.name}（${item.code}）：${profitSign(
+                item.profitPercent
+              )}${formatPercent(item.profitPercent)}%，損益 ${profitSign(
+                item.profit
+              )}${formatMoney(item.profit)} 元`
+          )
+          .join("\n")
+      : "暫無可計算資料";
+
+  const aiInput = totals.successful
+    .sort((a, b) => Math.abs(b.profit) - Math.abs(a.profit))
+    .slice(0, 8)
+    .map(
+      (item) =>
+        `${item.name}(${item.code}) 報酬${profitSign(item.profitPercent)}${formatPercent(
+          item.profitPercent
+        )}% 損益${profitSign(item.profit)}${formatMoney(item.profit)} 市值${formatMoney(
+          item.marketValue
+        )}`
+    )
+    .join("\n");
+
+  let aiSummary = "今日資料已整理完成，請搭配市場風險自行評估。";
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "你是台股持股日報助理。用繁體中文，語氣務實精簡，不保證獲利，不使用 Markdown 粗體符號。"
+        },
+        {
+          role: "user",
+          content: `請根據以下資料寫 3 句今日持股摘要，最後加 1 句風險提醒。
+
+持股檔數：${entries.length}
+總成本：${formatMoney(totals.totalCost)}
+總市值：${formatMoney(totals.totalMarket)}
+未實現損益：${profitSign(totals.totalProfit)}${formatMoney(totals.totalProfit)}
+總報酬率：${profitSign(totals.totalPercent)}${formatPercent(totals.totalPercent)}%
+已實現損益：${profitSign(realizedProfit)}${formatMoney(realizedProfit)}
+股息股利：${formatMoney(dividendTotal)}
+提醒數量：${alerts.length}
+
+主要持股資料：
+${aiInput}`
+        }
+      ],
+      max_tokens: 280
+    });
+    aiSummary = completion.choices[0].message.content.trim();
+  } catch (error) {
+    console.error("今日總結 AI 摘要失敗:", error.message);
+  }
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🗓️ 今日持股總結
+${new Date().toLocaleString("zh-TW")}
+
+📌 資產概況
+持股檔數：${entries.length} 檔
+總成本：${formatMoney(totals.totalCost)} 元
+總市值：${formatMoney(totals.totalMarket)} 元
+未實現損益：${profitSign(totals.totalProfit)}${formatMoney(totals.totalProfit)} 元
+總報酬率：${profitSign(totals.totalPercent)}${formatPercent(totals.totalPercent)}%
+已實現損益：${profitSign(realizedProfit)}${formatMoney(realizedProfit)} 元
+股息/股利：${formatMoney(dividendTotal)} 元
+含股息總收益：${profitSign(totalReturn)}${formatMoney(totalReturn)} 元
+
+📈 表現較強
+${formatDailyRank(strongest)}
+
+📉 表現較弱
+${formatDailyRank(weakest)}
+
+🔔 價格提醒
+目前啟用：${alerts.length} 筆
+
+🧠 AI 簡短解讀
+${aiSummary}${
+      totals.failedCount > 0
+        ? `\n\n提醒：${totals.failedCount} 檔即時報價查詢失敗，未列入總結。`
+        : ""
+    }`
   });
 }
 
