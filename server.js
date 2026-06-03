@@ -20,6 +20,7 @@ const portfolios = new Map();
 const portfolioTrades = new Map();
 const portfolioDividends = new Map();
 const priceAlerts = new Map();
+const portfolioBackups = new Map();
 const quoteCache = new Map();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
@@ -44,6 +45,9 @@ const dividendApiUrl = () =>
 
 const alertApiUrl = () =>
   `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/price_alerts`;
+
+const backupApiUrl = () =>
+  `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/portfolio_backups`;
 
 const parseOptionalMoney = (text, label) => {
   const match = text.match(new RegExp(`${label}\\s*(\\d+(?:\\.\\d+)?)`));
@@ -178,6 +182,102 @@ const replacePortfolio = async (ownerKey, portfolio) => {
       headers: supabaseHeaders()
     });
   }
+};
+
+const portfolioToRows = (portfolio) =>
+  [...portfolio.entries()]
+    .sort(([codeA], [codeB]) => codeA.localeCompare(codeB))
+    .map(([code, position]) => ({
+      code,
+      shares: Number(position.shares),
+      averageCost: Number(position.averageCost)
+    }));
+
+const rowsToPortfolio = (rows = []) => {
+  const portfolio = new Map();
+  for (const row of rows) {
+    const code = resolveStockCode(row.code);
+    const shares = Number(row.shares);
+    const averageCost = Number(row.averageCost);
+    if (/^\d{4,6}$/.test(code) && shares > 0 && averageCost > 0) {
+      portfolio.set(code, { shares, averageCost });
+    }
+  }
+  return portfolio;
+};
+
+const savePortfolioBackup = async (ownerKey) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const rows = portfolioToRows(portfolio);
+  if (rows.length === 0) {
+    return null;
+  }
+
+  const savedAt = new Date().toISOString();
+  if (!hasPortfolioDb) {
+    portfolioBackups.set(ownerKey, { rows, savedAt });
+    return { rows, savedAt };
+  }
+
+  await axios.post(
+    `${backupApiUrl()}?on_conflict=owner_key`,
+    {
+      owner_key: ownerKey,
+      portfolio: rows,
+      updated_at: savedAt
+    },
+    {
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      }
+    }
+  );
+
+  return { rows, savedAt };
+};
+
+const getPortfolioBackup = async (ownerKey) => {
+  if (!hasPortfolioDb) {
+    return portfolioBackups.get(ownerKey) || null;
+  }
+
+  const response = await axios.get(backupApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`,
+      select: "portfolio,updated_at",
+      limit: 1
+    }
+  });
+
+  const row = response.data?.[0];
+  if (!row) {
+    return null;
+  }
+
+  return {
+    rows: Array.isArray(row.portfolio) ? row.portfolio : [],
+    savedAt: row.updated_at
+  };
+};
+
+const restorePortfolioBackup = async (ownerKey) => {
+  const backup = await getPortfolioBackup(ownerKey);
+  if (!backup || backup.rows.length === 0) {
+    return null;
+  }
+
+  const portfolio = rowsToPortfolio(backup.rows);
+  if (portfolio.size === 0) {
+    return null;
+  }
+
+  await replacePortfolio(ownerKey, portfolio);
+  return {
+    ...backup,
+    portfolio
+  };
 };
 
 const recordTrade = async (ownerKey, trade) => {
@@ -747,6 +847,9 @@ async function handleEvent(event) {
 🗑️ 移除持股：持股-台積電
 📋 查看持股：我的持股
 📥 批次匯入：匯入持股
+💾 持股備份：持股備份
+📦 查看備份：持股備份查看
+♻️ 還原備份：持股還原
 🧾 買進紀錄：買進 台積電 10 2380
 💸 賣出紀錄：賣出 台積電 5 2450
 💰 含費用：買進 台積電 10 2380 手續費20
@@ -1203,6 +1306,74 @@ const portfolioTotals = (snapshots) => {
     totalPercent
   };
 };
+
+if (userMessage.trim() === "持股備份") {
+  const backup = await savePortfolioBackup(watchlistKey);
+  if (!backup) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有持股可備份。請先輸入「匯入持股」或「持股+台積電 35 2000」。"
+    });
+  }
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `💾 已建立持股備份
+持股檔數：${backup.rows.length} 檔
+備份時間：${new Date(backup.savedAt).toLocaleString("zh-TW")}
+
+之後若測試改亂，可輸入「持股還原」。`
+  });
+}
+
+if (userMessage.trim() === "持股備份查看" || userMessage.trim() === "查看持股備份") {
+  const backup = await getPortfolioBackup(watchlistKey);
+  if (!backup) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有持股備份。可輸入「持股備份」建立一份。"
+    });
+  }
+
+  const rows = backup.rows
+    .slice(0, 12)
+    .map(
+      (row, index) =>
+        `${index + 1}. ${stockNames[row.code] || row.code}（${row.code}）：${
+          row.shares
+        } 股｜成本 ${row.averageCost} 元`
+    );
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `📦 持股備份
+備份時間：${new Date(backup.savedAt).toLocaleString("zh-TW")}
+持股檔數：${backup.rows.length} 檔
+
+${rows.join("\n")}${
+      backup.rows.length > 12 ? `\n...另有 ${backup.rows.length - 12} 檔` : ""
+    }`
+  });
+}
+
+if (userMessage.trim() === "持股還原") {
+  const restored = await restorePortfolioBackup(watchlistKey);
+  if (!restored) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有可還原的持股備份。請先輸入「持股備份」。"
+    });
+  }
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `♻️ 已還原持股備份
+還原檔數：${restored.portfolio.size} 檔
+備份時間：${new Date(restored.savedAt).toLocaleString("zh-TW")}
+
+輸入「我的持股」可確認最新持股。`
+  });
+}
 
 const portfolioImportMatch = userMessage.trim().match(/^匯入持股\s*\n([\s\S]+)$/);
 if (portfolioImportMatch) {
