@@ -17,6 +17,113 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiU2lkZXIiLCJlbWFpbCI6ImxmY2x1MDQxNEBnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.K_yeruf5xx8yChBUdcpOTSVAak3zNgi81a0zmqYk96A";
 const watchlists = new Map();
 const portfolios = new Map();
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+const hasPortfolioDb = Boolean(SUPABASE_URL && SUPABASE_KEY);
+
+const supabaseHeaders = () => ({
+  apikey: SUPABASE_KEY,
+  Authorization: `Bearer ${SUPABASE_KEY}`,
+  "Content-Type": "application/json",
+  Prefer: "return=minimal"
+});
+
+const portfolioApiUrl = () =>
+  `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/portfolio_positions`;
+
+const getPortfolio = async (ownerKey) => {
+  if (!hasPortfolioDb) {
+    return portfolios.get(ownerKey) || new Map();
+  }
+
+  const response = await axios.get(portfolioApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`,
+      select: "code,shares,average_cost"
+    }
+  });
+
+  return new Map(
+    (response.data || []).map((row) => [
+      row.code,
+      {
+        shares: Number(row.shares),
+        averageCost: Number(row.average_cost)
+      }
+    ])
+  );
+};
+
+const savePortfolioPosition = async (ownerKey, code, position) => {
+  if (!hasPortfolioDb) {
+    const portfolio = portfolios.get(ownerKey) || new Map();
+    portfolio.set(code, position);
+    portfolios.set(ownerKey, portfolio);
+    return;
+  }
+
+  await axios.post(
+    `${portfolioApiUrl()}?on_conflict=owner_key,code`,
+    {
+      owner_key: ownerKey,
+      code,
+      shares: position.shares,
+      average_cost: position.averageCost
+    },
+    {
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      }
+    }
+  );
+};
+
+const deletePortfolioPosition = async (ownerKey, code) => {
+  if (!hasPortfolioDb) {
+    const portfolio = portfolios.get(ownerKey) || new Map();
+    portfolio.delete(code);
+    portfolios.set(ownerKey, portfolio);
+    return;
+  }
+
+  await axios.delete(portfolioApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`,
+      code: `eq.${code}`
+    }
+  });
+};
+
+const replacePortfolio = async (ownerKey, portfolio) => {
+  if (!hasPortfolioDb) {
+    portfolios.set(ownerKey, portfolio);
+    return;
+  }
+
+  await axios.delete(portfolioApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`
+    }
+  });
+
+  const rows = [...portfolio.entries()].map(([code, position]) => ({
+    owner_key: ownerKey,
+    code,
+    shares: position.shares,
+    average_cost: position.averageCost
+  }));
+
+  if (rows.length > 0) {
+    await axios.post(portfolioApiUrl(), rows, {
+      headers: supabaseHeaders()
+    });
+  }
+};
 
 app.get('/audio', async (req, res) => {
   try {
@@ -88,6 +195,15 @@ async function handleEvent(event) {
 🌐 大盤行情：大盤
 🧠 大盤分析：分析大盤
 🔊 語音播報：語音大盤`
+    });
+  }
+
+  if (marketInput === "資料庫狀態") {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: hasPortfolioDb
+        ? "✅ 持股資料庫已啟用，持股可永久保存。"
+        : "⚠️ 持股資料庫尚未設定，目前使用記憶體暫存，Railway 重啟後會清空。"
     });
   }
 
@@ -444,14 +560,16 @@ if (portfolioImportMatch) {
     });
   }
 
-  portfolios.set(watchlistKey, portfolio);
+  await replacePortfolio(watchlistKey, portfolio);
   return client.replyMessage(event.replyToken, {
     type: "text",
     text: `📥 已匯入 ${portfolio.size} 檔持股${
       invalidLines.length > 0
         ? `\n⚠️ ${invalidLines.length} 行格式錯誤，未匯入。`
         : ""
-    }\n\n輸入「我的持股」即可查看即時損益。`
+    }\n\n輸入「我的持股」即可查看即時損益。${
+      hasPortfolioDb ? "" : "\n\n提醒：目前未設定資料庫，Railway 重啟後資料會清空。"
+    }`
   });
 }
 
@@ -470,9 +588,7 @@ if (portfolioAddMatch) {
     });
   }
 
-  const portfolio = portfolios.get(watchlistKey) || new Map();
-  portfolio.set(code, { shares, averageCost });
-  portfolios.set(watchlistKey, portfolio);
+  await savePortfolioPosition(watchlistKey, code, { shares, averageCost });
 
   return client.replyMessage(event.replyToken, {
     type: "text",
@@ -485,9 +601,7 @@ if (portfolioAddMatch) {
 const portfolioRemoveMatch = userMessage.trim().match(/^持股-\s*(.+)$/);
 if (portfolioRemoveMatch) {
   const code = resolveStockCode(portfolioRemoveMatch[1]);
-  const portfolio = portfolios.get(watchlistKey) || new Map();
-  portfolio.delete(code);
-  portfolios.set(watchlistKey, portfolio);
+  await deletePortfolioPosition(watchlistKey, code);
 
   return client.replyMessage(event.replyToken, {
     type: "text",
@@ -496,7 +610,7 @@ if (portfolioRemoveMatch) {
 }
 
 if (userMessage.trim() === "我的持股" || userMessage.trim() === "持股") {
-  const portfolio = portfolios.get(watchlistKey) || new Map();
+  const portfolio = await getPortfolio(watchlistKey);
   const entries = [...portfolio.entries()];
   if (entries.length === 0) {
     return client.replyMessage(event.replyToken, {
@@ -530,7 +644,9 @@ if (userMessage.trim() === "我的持股" || userMessage.trim() === "持股") {
 
   return client.replyMessage(event.replyToken, {
     type: "text",
-    text: `💼 我的持股\n\n${rows.join("\n\n")}\n\n提醒：此為試算資訊，不含手續費與交易稅。Railway 重啟後，持股資料會暫時清空。`
+    text: `💼 我的持股\n\n${rows.join("\n\n")}\n\n提醒：此為試算資訊，不含手續費與交易稅。${
+      hasPortfolioDb ? "" : "Railway 重啟後，持股資料會暫時清空。"
+    }`
   });
 }
 
