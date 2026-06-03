@@ -19,6 +19,7 @@ const watchlists = new Map();
 const portfolios = new Map();
 const portfolioTrades = new Map();
 const portfolioDividends = new Map();
+const priceAlerts = new Map();
 const quoteCache = new Map();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
@@ -41,6 +42,9 @@ const tradeApiUrl = () =>
 const dividendApiUrl = () =>
   `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/portfolio_dividends`;
 
+const alertApiUrl = () =>
+  `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/price_alerts`;
+
 const parseOptionalMoney = (text, label) => {
   const match = text.match(new RegExp(`${label}\\s*(\\d+(?:\\.\\d+)?)`));
   return match ? Number(match[1]) : null;
@@ -49,6 +53,11 @@ const parseOptionalMoney = (text, label) => {
 const estimateBuyFee = (amount) => Math.round(amount * 0.001425);
 const estimateSellFee = (amount) => Math.round(amount * 0.001425);
 const estimateSellTax = (amount) => Math.round(amount * 0.003);
+
+const normalizeAlertDirection = (text = "") =>
+  text.includes("下") || text.toLowerCase().includes("below") ? "below" : "above";
+
+const alertDirectionLabel = (direction) => (direction === "below" ? "以下" : "以上");
 
 const getPortfolio = async (ownerKey) => {
   if (!hasPortfolioDb) {
@@ -282,6 +291,77 @@ const getDividendTotal = async (ownerKey) => {
   );
 };
 
+const savePriceAlert = async (ownerKey, alert) => {
+  if (!hasPortfolioDb) {
+    const alerts = priceAlerts.get(ownerKey) || [];
+    const nextAlerts = alerts.filter(
+      (item) => !(item.code === alert.code && item.direction === alert.direction)
+    );
+    nextAlerts.push({ ...alert, createdAt: new Date().toISOString() });
+    priceAlerts.set(ownerKey, nextAlerts);
+    return;
+  }
+
+  await axios.post(
+    `${alertApiUrl()}?on_conflict=owner_key,code,direction`,
+    {
+      owner_key: ownerKey,
+      code: alert.code,
+      direction: alert.direction,
+      target_price: alert.targetPrice,
+      active: true
+    },
+    {
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      }
+    }
+  );
+};
+
+const getPriceAlerts = async (ownerKey) => {
+  if (!hasPortfolioDb) {
+    return (priceAlerts.get(ownerKey) || []).filter((alert) => alert.active !== false);
+  }
+
+  const response = await axios.get(alertApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`,
+      active: "eq.true",
+      select: "code,direction,target_price,created_at",
+      order: "created_at.desc"
+    }
+  });
+
+  return (response.data || []).map((row) => ({
+    code: row.code,
+    direction: row.direction,
+    targetPrice: Number(row.target_price),
+    createdAt: row.created_at
+  }));
+};
+
+const deletePriceAlert = async (ownerKey, code) => {
+  if (!hasPortfolioDb) {
+    const alerts = priceAlerts.get(ownerKey) || [];
+    priceAlerts.set(
+      ownerKey,
+      alerts.filter((alert) => alert.code !== code)
+    );
+    return;
+  }
+
+  await axios.delete(alertApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`,
+      code: `eq.${code}`
+    }
+  });
+};
+
 app.get('/audio', async (req, res) => {
   try {
     const text = String(req.query.text || '').slice(0, 500);
@@ -356,6 +436,12 @@ async function handleEvent(event) {
 📜 交易紀錄：交易紀錄
 🎁 股息紀錄：股息紀錄
 💰 已實現損益：已實現損益
+
+🔔 新增提醒：提醒+台積電 2500 以上
+🔔 停損提醒：提醒+台積電 2200 以下
+📋 提醒列表：提醒列表
+🔎 檢查提醒：檢查提醒
+🗑️ 移除提醒：提醒-台積電
 
 🌐 大盤行情：大盤
 🧠 大盤分析：分析大盤
@@ -869,6 +955,104 @@ if (portfolioRemoveMatch) {
   return client.replyMessage(event.replyToken, {
     type: "text",
     text: `🗑️ 已移除持股：${stockNames[code] || code}（${code}）`
+  });
+}
+
+const alertAddMatch = userMessage
+  .trim()
+  .match(/^提醒\+\s*(\S+)\s+(\d+(?:\.\d+)?)(?:\s*(以上|以下|above|below))?$/i);
+if (alertAddMatch) {
+  const code = resolveStockCode(alertAddMatch[1]);
+  const targetPrice = Number(alertAddMatch[2]);
+  const direction = normalizeAlertDirection(alertAddMatch[3] || "以上");
+
+  if (!/^\d{4,6}$/.test(code) || targetPrice <= 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入：提醒+台積電 2500 以上"
+    });
+  }
+
+  await savePriceAlert(watchlistKey, { code, targetPrice, direction });
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🔔 已新增價格提醒：${stockNames[code] || code}（${code}）
+條件：${targetPrice} 元 ${alertDirectionLabel(direction)}
+
+輸入「檢查提醒」即可檢查是否到價。`
+  });
+}
+
+const alertRemoveMatch = userMessage.trim().match(/^提醒-\s*(.+)$/);
+if (alertRemoveMatch) {
+  const code = resolveStockCode(alertRemoveMatch[1]);
+  await deletePriceAlert(watchlistKey, code);
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🗑️ 已移除價格提醒：${stockNames[code] || code}（${code}）`
+  });
+}
+
+if (userMessage.trim() === "提醒列表") {
+  const alerts = await getPriceAlerts(watchlistKey);
+  if (alerts.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有價格提醒。可輸入：提醒+台積電 2500 以上"
+    });
+  }
+
+  const rows = alerts
+    .map(
+      (alert, index) =>
+        `${index + 1}. ${stockNames[alert.code] || alert.code}（${alert.code}）：${
+          alert.targetPrice
+        } 元 ${alertDirectionLabel(alert.direction)}`
+    )
+    .join("\n");
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `📋 價格提醒列表\n\n${rows}`
+  });
+}
+
+if (userMessage.trim() === "檢查提醒") {
+  const alerts = await getPriceAlerts(watchlistKey);
+  if (alerts.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有價格提醒。可輸入：提醒+台積電 2500 以上"
+    });
+  }
+
+  const results = await Promise.all(
+    alerts.map(async (alert) => {
+      try {
+        const quote = await fetchYahooQuote(alert.code, 2500);
+        const price = Number(quote.regularMarketPrice);
+        const triggered =
+          alert.direction === "below"
+            ? price <= alert.targetPrice
+            : price >= alert.targetPrice;
+
+        return `${triggered ? "✅ 到價" : "⏳ 未到"} ${stockNames[alert.code] || alert.code}（${
+          alert.code
+        }）
+現價：${price} 元｜條件：${alert.targetPrice} 元 ${alertDirectionLabel(
+          alert.direction
+        )}`;
+      } catch {
+        return `⚠️ ${stockNames[alert.code] || alert.code}（${alert.code}）：報價查詢失敗`;
+      }
+    })
+  );
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🔎 價格提醒檢查\n\n${results.join("\n\n")}`
   });
 }
 
