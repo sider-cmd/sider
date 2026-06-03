@@ -19,6 +19,7 @@ const watchlists = new Map();
 const portfolios = new Map();
 const portfolioTrades = new Map();
 const portfolioDividends = new Map();
+const quoteCache = new Map();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -673,15 +674,21 @@ const resolveStockCode = (input) => {
   return reverseStockNames[normalized] || normalized;
 };
 
-const fetchYahooQuote = async (code) => {
+const fetchYahooQuote = async (code, timeoutMs = 5000) => {
+  const cached = quoteCache.get(code);
+  if (cached && Date.now() - cached.fetchedAt < 60 * 1000) {
+    return cached.meta;
+  }
+
   for (const suffix of [".TW", ".TWO"]) {
     try {
       const response = await axios.get(
         `https://query1.finance.yahoo.com/v8/finance/chart/${code}${suffix}`,
-        { timeout: 5000 }
+        { timeout: timeoutMs }
       );
       const meta = response.data.chart.result?.[0]?.meta;
       if (meta) {
+        quoteCache.set(code, { meta, fetchedAt: Date.now() });
         return meta;
       }
     } catch {
@@ -691,13 +698,16 @@ const fetchYahooQuote = async (code) => {
   throw new Error("Yahoo 查無股票資料");
 };
 
-const getPortfolioSnapshots = async (entries) =>
-  Promise.all(
+const getPortfolioSnapshots = async (entries, options = {}) => {
+  const timeoutMs = options.timeoutMs || 2500;
+  const raceMs = options.raceMs || 3500;
+
+  return Promise.all(
     entries.map(async ([code, position]) =>
       Promise.race([
         (async () => {
           try {
-            const quote = await fetchYahooQuote(code);
+            const quote = await fetchYahooQuote(code, timeoutMs);
             const price = Number(quote.regularMarketPrice);
             if (!Number.isFinite(price)) {
               throw new Error("查無即時股價");
@@ -739,12 +749,13 @@ const getPortfolioSnapshots = async (entries) =>
                 averageCost: position.averageCost,
                 error: true
               }),
-            7000
+            raceMs
           )
         )
       ])
     )
   );
+};
 
 const formatMoney = (value) => Number(value).toFixed(0);
 const formatPercent = (value) => Number(value).toFixed(2);
