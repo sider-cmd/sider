@@ -393,6 +393,23 @@ const resolveStockCode = (input) => {
   return reverseStockNames[normalized] || normalized;
 };
 
+const fetchYahooQuote = async (code) => {
+  for (const suffix of [".TW", ".TWO"]) {
+    try {
+      const response = await axios.get(
+        `https://query1.finance.yahoo.com/v8/finance/chart/${code}${suffix}`
+      );
+      const meta = response.data.chart.result?.[0]?.meta;
+      if (meta) {
+        return meta;
+      }
+    } catch {
+      // Try the OTC suffix when the listed-market suffix has no result.
+    }
+  }
+  throw new Error("Yahoo 查無股票資料");
+};
+
 const portfolioImportMatch = userMessage.trim().match(/^匯入持股\s*\n([\s\S]+)$/);
 if (portfolioImportMatch) {
   const lines = portfolioImportMatch[1]
@@ -491,10 +508,8 @@ if (userMessage.trim() === "我的持股" || userMessage.trim() === "持股") {
   const rows = await Promise.all(
     entries.map(async ([code, position]) => {
       try {
-        const quoteRes = await axios.get(
-          `https://query1.finance.yahoo.com/v8/finance/chart/${code}.TW`
-        );
-        const price = quoteRes.data.chart.result?.[0]?.meta?.regularMarketPrice;
+        const quote = await fetchYahooQuote(code);
+        const price = quote.regularMarketPrice;
         if (!Number.isFinite(price)) {
           throw new Error("查無即時股價");
         }
@@ -559,10 +574,7 @@ if (userMessage.trim() === "自選股") {
   const rows = await Promise.all(
     list.map(async (code) => {
       try {
-        const quoteRes = await axios.get(
-          `https://query1.finance.yahoo.com/v8/finance/chart/${code}.TW`
-        );
-        const meta = quoteRes.data.chart.result?.[0]?.meta;
+        const meta = await fetchYahooQuote(code);
         const price = meta?.regularMarketPrice ?? "暫無資料";
         const previousClose = meta?.previousClose;
         const percent =
@@ -621,11 +633,7 @@ const isStockQuery =
 
 if (isStockQuery) {
   try {
-    const response = await axios.get(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${pureCode}.TW`
-    );
-
-    const result = response.data.chart.result?.[0]?.meta;
+    const result = await fetchYahooQuote(pureCode);
     if (!result) {
       throw new Error("Yahoo 查無股票資料");
     }
