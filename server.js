@@ -58,6 +58,37 @@ const parseOptionalMoney = (text, label) => {
   return match ? Number(match[1]) : null;
 };
 
+const parseNumberToken = (value) => {
+  const number = Number(String(value || "").replace(/,/g, ""));
+  return Number.isFinite(number) ? number : NaN;
+};
+
+const parseHistoricalTradeDate = (value) => {
+  const match = String(value || "")
+    .trim()
+    .match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const [, year, month, day] = match;
+  const yyyy = year.padStart(4, "0");
+  const mm = month.padStart(2, "0");
+  const dd = day.padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}T00:00:00+08:00`;
+};
+
+const parseTradeTypeToken = (value) => {
+  const text = String(value || "").trim().toLowerCase();
+  if (["買進", "買入", "buy", "b"].includes(text)) {
+    return "buy";
+  }
+  if (["賣出", "sell", "s"].includes(text)) {
+    return "sell";
+  }
+  return null;
+};
+
 const estimateBuyFee = (amount) => Math.round(amount * 0.001425);
 const estimateSellFee = (amount) => Math.round(amount * 0.001425);
 const estimateSellTax = (amount) => Math.round(amount * 0.003);
@@ -285,9 +316,11 @@ const restorePortfolioBackup = async (ownerKey) => {
 };
 
 const recordTrade = async (ownerKey, trade) => {
+  const tradedAt = trade.tradedAt || new Date().toISOString();
+
   if (!hasPortfolioDb) {
     const trades = portfolioTrades.get(ownerKey) || [];
-    trades.push({ ...trade, tradedAt: new Date().toISOString() });
+    trades.push({ ...trade, tradedAt });
     portfolioTrades.set(ownerKey, trades);
     return;
   }
@@ -302,7 +335,8 @@ const recordTrade = async (ownerKey, trade) => {
       price: trade.price,
       fee: trade.fee || 0,
       tax: trade.tax || 0,
-      realized_profit: trade.realizedProfit || 0
+      realized_profit: trade.realizedProfit || 0,
+      traded_at: tradedAt
     },
     {
       headers: supabaseHeaders()
@@ -863,6 +897,7 @@ async function handleEvent(event) {
 💸 賣出紀錄：賣出 台積電 5 2450
 💰 含費用：買進 台積電 10 2380 手續費20
 💰 含稅費：賣出 台積電 5 2450 手續費20 交易稅36
+📥 匯入交易：交易匯入格式
 🗑️ 刪除交易：交易刪除 1
 ↩️ 刪除並回復買進：交易刪除回復 1
 🎁 股息股利：股息 台積電 1000
@@ -1837,6 +1872,128 @@ if (userMessage.trim() === "檢查提醒") {
   return client.replyMessage(event.replyToken, {
     type: "text",
     text: `🔎 價格提醒檢查\n\n${results.join("\n\n")}`
+  });
+}
+
+if (userMessage.trim() === "交易匯入格式") {
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `📥 批次匯入交易格式
+
+第一行輸入：匯入交易
+第二行開始每行一筆：
+日期 買進/賣出 代號 股數 價格 手續費 交易稅
+
+範例：
+匯入交易
+2026-06-03 買進 2353 300 42.5 18 0
+2026-06-02 賣出 2409 1000 25 36 75
+
+提醒：這只匯入交易歷史，不會改目前持股。`
+  });
+}
+
+const tradeImportMatch = userMessage.trim().match(/^匯入交易\s*\n([\s\S]+)$/);
+if (tradeImportMatch) {
+  const lines = tradeImportMatch[1]
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入「交易匯入格式」查看範例。"
+    });
+  }
+
+  const saved = [];
+  const failed = [];
+
+  for (const [lineIndex, line] of lines.entries()) {
+    const parts = line.split(/\s+/);
+    if (parts.length < 5) {
+      failed.push(`${lineIndex + 1}. 欄位不足：${line}`);
+      continue;
+    }
+
+    const tradedAt = parseHistoricalTradeDate(parts[0]);
+    const type = parseTradeTypeToken(parts[1]);
+    const code = resolveStockCode(parts[2]);
+    const shares = parseNumberToken(parts[3]);
+    const price = parseNumberToken(parts[4]);
+    const amount = shares * price;
+    const fee =
+      parts[5] !== undefined
+        ? parseNumberToken(parts[5])
+        : type === "sell"
+        ? estimateSellFee(amount)
+        : estimateBuyFee(amount);
+    const tax =
+      parts[6] !== undefined
+        ? parseNumberToken(parts[6])
+        : type === "sell"
+        ? estimateSellTax(amount)
+        : 0;
+    const realizedProfit =
+      parts[7] !== undefined ? parseNumberToken(parts[7]) : 0;
+
+    if (
+      !tradedAt ||
+      !type ||
+      !/^\d{4,6}$/.test(code) ||
+      !Number.isFinite(shares) ||
+      !Number.isFinite(price) ||
+      !Number.isFinite(fee) ||
+      !Number.isFinite(tax) ||
+      !Number.isFinite(realizedProfit) ||
+      shares <= 0 ||
+      price <= 0 ||
+      fee < 0 ||
+      tax < 0
+    ) {
+      failed.push(`${lineIndex + 1}. 格式錯誤：${line}`);
+      continue;
+    }
+
+    await recordTrade(watchlistKey, {
+      code,
+      type,
+      shares,
+      price,
+      fee,
+      tax,
+      realizedProfit,
+      tradedAt
+    });
+
+    const typeLabel = type === "buy" ? "買進" : "賣出";
+    saved.push(
+      `${parts[0]} ${typeLabel} ${stockNames[code] || code}（${code}）${formatMoney(
+        shares
+      )} 股`
+    );
+  }
+
+  const savedText =
+    saved.length > 0
+      ? saved.slice(0, 8).join("\n") +
+        (saved.length > 8 ? `\n...另 ${saved.length - 8} 筆` : "")
+      : "無";
+  const failedText =
+    failed.length > 0
+      ? `\n\n未匯入：${failed.length} 筆\n${failed.slice(0, 5).join("\n")}`
+      : "";
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `📥 已匯入交易紀錄：${saved.length} 筆
+
+${savedText}
+${failedText}
+
+提醒：這只補交易歷史，不會改目前持股。
+輸入「交易紀錄」可查看最新交易。`
   });
 }
 
