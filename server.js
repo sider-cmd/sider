@@ -1215,37 +1215,45 @@ ${rows}${hidden}`;
 };
 
 const buildTieredCostAlertSummary = async (ownerKey) => {
-  const alerts = await getTieredCostAlerts(ownerKey);
-  if (alerts.length === 0) {
-    return "?????????????\n?????????? 15 30 50";
+  const portfolio = await getPortfolio(ownerKey);
+  const entries = [...portfolio.entries()].filter(([, position]) => {
+    const shares = Number(position.shares || 0);
+    const averageCost = Number(position.averageCost || 0);
+    return shares > 0 && averageCost > 0;
+  });
+
+  if (entries.length === 0) {
+    return "?? ??????\n\n???????????????\n?????????";
   }
 
-  const codes = [...new Set(alerts.map((alert) => alert.code))];
-  const tierCounts = new Map();
-  for (const alert of alerts) {
-    const percent = Number(alert.percent);
-    tierCounts.set(percent, (tierCounts.get(percent) || 0) + 1);
-  }
-
-  const tierRows = [...tierCounts.entries()]
-    .sort((a, b) => a[0] - b[0])
+  const percents = [15, 30, 50];
+  const totalAlerts = entries.length * percents.length * 2;
+  const costValues = entries.map(([, position]) => Number(position.shares) * Number(position.averageCost));
+  const totalCost = costValues.reduce((sum, value) => sum + value, 0);
+  const largest = entries
+    .map(([code, position]) => ({
+      code,
+      name: stockNames[code] || code,
+      shares: Number(position.shares),
+      averageCost: Number(position.averageCost),
+      costValue: Number(position.shares) * Number(position.averageCost)
+    }))
+    .sort((a, b) => b.costValue - a.costValue)
+    .slice(0, 5)
     .map(
-      ([percent, count]) =>
-        `${formatMoney(percent)}% ${costTierLabel(percent)}?${count} ?`
+      (item, index) =>
+        `${index + 1}. ${item.name}?${item.code}???? ${formatMoney(item.averageCost)} ???? ${formatMoney(item.costValue)} ?`
     )
     .join("\n");
 
-  return `?? ??????
+  const tierRows = percents
+    .map((percent) => {
+      const label = costTierLabel(percent);
+      return `${formatMoney(percent)}% ${label}?${entries.length * 2} ???? ${entries.length} / ?? ${entries.length}?`;
+    })
+    .join("\n");
 
-?????${alerts.length} ?
-?????${codes.length} ?
-
-?????
-${tierRows}
-
-???????????????????????
-????????????????
-??????????????? 15 30 50`;
+  return `?? ??????\n\n?????????????\n?????${entries.length} ?\n?????${totalAlerts} ?\n??????${formatMoney(totalCost)} ?\n\n?????\n${tierRows}\n\n????? 5?\n${largest}\n\n?????????????????????????\n????????????????`;
 };
 const checkAndPushTieredCostAlerts = async () => {
   if (!hasPortfolioDb) {
