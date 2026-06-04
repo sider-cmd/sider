@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-04 \u7570\u5e38\u6458\u8981\u7a69\u5b9a\u7248";
+const BOT_BUILD_VERSION = "2026-06-04 SUMMARY-CN-FIX-3";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -1224,38 +1224,47 @@ const buildTieredCostAlertSummary = async (ownerKey) => {
   });
 
   if (entries.length === 0) {
-    return "?? ??????\n\n???????????????\n?????????";
+    return "\uD83C\uDFAF \u6210\u672C\u7570\u5E38\u6458\u8981\n\n\u76EE\u524D\u6C92\u6709\u53EF\u5957\u7528\u7684\u6301\u80A1\u6210\u672C\u8CC7\u6599\u3002\n\u53EF\u5148\u8F38\u5165\uFF1A\u6211\u7684\u6301\u80A1";
   }
 
   const percents = [15, 30, 50];
   const totalAlerts = entries.length * percents.length * 2;
   const rows = entries.map(([code, position]) => ({
     code,
-    shares: Number(position.shares),
-    averageCost: Number(position.averageCost),
-    costValue: Number(position.shares) * Number(position.averageCost)
+    shares: Number(position.shares || 0),
+    averageCost: Number(position.averageCost || 0),
+    costValue: Number(position.shares || 0) * Number(position.averageCost || 0)
   }));
   const totalCost = rows.reduce((sum, row) => sum + row.costValue, 0);
 
   const largest = [...rows]
     .sort((a, b) => b.costValue - a.costValue)
     .slice(0, 5)
-    .map(
-      (item, index) =>
-        `${index + 1}. ${item.code}??? ${fmt(item.averageCost)} ???? ${fmt(item.costValue)} ?`
+    .map((item, index) =>
+      (index + 1) + ". " + item.code + "\uFF1A\u6210\u672C " + fmt(item.averageCost) + " \u5143\uFF0C\u90E8\u4F4D " + fmt(item.costValue) + " \u5143"
     )
     .join("\n");
 
   const tierRows = percents
     .map((percent) => {
-      const upperCount = entries.length;
-      const lowerCount = entries.length;
-      return `${fmt(percent)}%?${upperCount + lowerCount} ???? ${upperCount} / ?? ${lowerCount}?`;
+      const count = entries.length;
+      return fmt(percent) + "%\uFF1A" + (count * 2) + " \u7B46\uFF08\u4E0A\u7DDA " + count + " / \u4E0B\u7DDA " + count + "\uFF09";
     })
     .join("\n");
 
-  return `?? ??????\n\n?????????????\n?????${entries.length} ?\n?????${totalAlerts} ?\n??????${fmt(totalCost)} ?\n\n?????\n${tierRows}\n\n????? 5?\n${largest}\n\n???????????????????????\n???????????????`;
+  return "\uD83C\uDFAF \u6210\u672C\u7570\u5E38\u6458\u8981\n\n" +
+    "\u8CC7\u6599\u4F86\u6E90\uFF1A\u76EE\u524D\u6301\u80A1\u5E73\u5747\u6210\u672C\n" +
+    "\u5957\u7528\u6301\u80A1\uFF1A" + entries.length + " \u6A94\n" +
+    "\u4F30\u7B97\u63D0\u9192\uFF1A" + totalAlerts + " \u7B46\n" +
+    "\u6301\u80A1\u7E3D\u6210\u672C\uFF1A" + fmt(totalCost) + " \u5143\n\n" +
+    "\u5206\u7D1A\u4F30\u7B97\uFF1A\n" +
+    tierRows + "\n\n" +
+    "\u6210\u672C\u90E8\u4F4D\u524D 5\uFF1A\n" +
+    largest + "\n\n" +
+    "\u63D0\u793A\uFF1A\u9019\u662F\u7A69\u5B9A\u7248\u6458\u8981\uFF0C\u53EA\u8B80\u6301\u80A1\u8868\uFF0C\u4E0D\u67E5\u63D0\u9192\u8868\u3002\n" +
+    "\u5B8C\u6574\u63D0\u9192\u6E05\u55AE\uFF1A\u6210\u672C\u7570\u5E38\u5206\u7D1A\u67E5\u770B";
 };
+
 const checkAndPushTieredCostAlerts = async () => {
   if (!hasPortfolioDb) {
     return;
