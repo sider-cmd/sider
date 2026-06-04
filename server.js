@@ -20,6 +20,7 @@ const portfolios = new Map();
 const portfolioTrades = new Map();
 const portfolioDividends = new Map();
 const priceAlerts = new Map();
+const tieredCostAlerts = new Map();
 const portfolioBackups = new Map();
 const portfolioValueSnapshots = new Map();
 const quoteCache = new Map();
@@ -50,6 +51,9 @@ const dividendApiUrl = () =>
 
 const alertApiUrl = () =>
   `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/price_alerts`;
+
+const tieredCostAlertApiUrl = () =>
+  `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/cost_band_alerts`;
 
 const backupApiUrl = () =>
   `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/portfolio_backups`;
@@ -975,6 +979,303 @@ const deleteCostBandAlerts = async (ownerKey, percent = 30) => {
     }
   }
   return { rows, deleted };
+};
+
+const costTierLabel = (percent) => {
+  const value = Number(percent);
+  if (value >= 50) return "重大";
+  if (value >= 30) return "警戒";
+  if (value >= 15) return "注意";
+  return "觀察";
+};
+
+const parseCostTierPercents = (text, fallback = [15, 30, 50]) => {
+  const numbers = String(text || "")
+    .split(/[,\s，、]+/)
+    .map((item) => Number(item))
+    .filter((value) => Number.isFinite(value) && value > 0 && value < 100);
+  const source = numbers.length > 0 ? numbers : fallback;
+  return [...new Set(source.map((value) => roundPrice(value)))].sort((a, b) => a - b);
+};
+
+const tieredCostAlertKey = (alert) =>
+  `${alert.code}:${alert.percent}:${alert.direction}`;
+
+const saveTieredCostAlert = async (ownerKey, alert) => {
+  if (!hasPortfolioDb) {
+    const alerts = tieredCostAlerts.get(ownerKey) || [];
+    const nextAlerts = alerts.filter((item) => tieredCostAlertKey(item) !== tieredCostAlertKey(alert));
+    nextAlerts.push({ ...alert, active: true, createdAt: new Date().toISOString() });
+    tieredCostAlerts.set(ownerKey, nextAlerts);
+    return;
+  }
+
+  await axios.post(
+    `${tieredCostAlertApiUrl()}?on_conflict=owner_key,code,percent,direction`,
+    {
+      owner_key: ownerKey,
+      code: alert.code,
+      percent: alert.percent,
+      direction: alert.direction,
+      target_price: alert.targetPrice,
+      active: true
+    },
+    {
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      }
+    }
+  );
+};
+
+const getTieredCostAlerts = async (ownerKey) => {
+  if (!hasPortfolioDb) {
+    return (tieredCostAlerts.get(ownerKey) || []).filter((alert) => alert.active !== false);
+  }
+
+  const response = await axios.get(tieredCostAlertApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`,
+      active: "eq.true",
+      select: "code,percent,direction,target_price,created_at",
+      order: "percent.asc"
+    }
+  });
+
+  return (response.data || []).map((row) => ({
+    code: row.code,
+    percent: Number(row.percent),
+    direction: row.direction,
+    targetPrice: Number(row.target_price),
+    createdAt: row.created_at
+  }));
+};
+
+const getAllActiveTieredCostAlerts = async () => {
+  if (!hasPortfolioDb) {
+    return [...tieredCostAlerts.entries()].flatMap(([ownerKey, alerts]) =>
+      alerts
+        .filter((alert) => alert.active !== false)
+        .map((alert) => ({ ...alert, ownerKey }))
+    );
+  }
+
+  const response = await axios.get(tieredCostAlertApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      active: "eq.true",
+      select: "owner_key,code,percent,direction,target_price,created_at",
+      order: "percent.asc"
+    }
+  });
+
+  return (response.data || []).map((row) => ({
+    ownerKey: row.owner_key,
+    code: row.code,
+    percent: Number(row.percent),
+    direction: row.direction,
+    targetPrice: Number(row.target_price),
+    createdAt: row.created_at
+  }));
+};
+
+const deactivateTieredCostAlert = async (ownerKey, alert) => {
+  if (!hasPortfolioDb) {
+    const alerts = tieredCostAlerts.get(ownerKey) || [];
+    tieredCostAlerts.set(
+      ownerKey,
+      alerts.map((item) =>
+        tieredCostAlertKey(item) === tieredCostAlertKey(alert)
+          ? { ...item, active: false, lastTriggeredAt: new Date().toISOString() }
+          : item
+      )
+    );
+    return;
+  }
+
+  await axios.patch(
+    tieredCostAlertApiUrl(),
+    {
+      active: false,
+      last_triggered_at: new Date().toISOString()
+    },
+    {
+      headers: supabaseHeaders(),
+      params: {
+        owner_key: `eq.${ownerKey}`,
+        code: `eq.${alert.code}`,
+        percent: `eq.${alert.percent}`,
+        direction: `eq.${alert.direction}`
+      }
+    }
+  );
+};
+
+const setupTieredCostAlerts = async (ownerKey, percents) => {
+  const rows = [];
+  for (const percent of percents) {
+    const costRows = await calculateCostBandRows(ownerKey, percent);
+    for (const row of costRows) {
+      const upperAlert = {
+        code: row.code,
+        percent,
+        direction: "above",
+        targetPrice: row.upperPrice
+      };
+      const lowerAlert = {
+        code: row.code,
+        percent,
+        direction: "below",
+        targetPrice: row.lowerPrice
+      };
+      await saveTieredCostAlert(ownerKey, upperAlert);
+      await saveTieredCostAlert(ownerKey, lowerAlert);
+      rows.push({ ...row, percent });
+    }
+  }
+  return rows;
+};
+
+const deleteTieredCostAlerts = async (ownerKey, percents = []) => {
+  const alerts = await getTieredCostAlerts(ownerKey);
+  const targets =
+    percents.length > 0
+      ? alerts.filter((alert) => percents.includes(Number(alert.percent)))
+      : alerts;
+  let deleted = 0;
+
+  if (!hasPortfolioDb) {
+    const deleteKeys = new Set(targets.map(tieredCostAlertKey));
+    const before = (tieredCostAlerts.get(ownerKey) || []).length;
+    tieredCostAlerts.set(
+      ownerKey,
+      (tieredCostAlerts.get(ownerKey) || []).filter((alert) => !deleteKeys.has(tieredCostAlertKey(alert)))
+    );
+    return { deleted: before - (tieredCostAlerts.get(ownerKey) || []).length };
+  }
+
+  for (const alert of targets) {
+    await axios.delete(tieredCostAlertApiUrl(), {
+      headers: supabaseHeaders(),
+      params: {
+        owner_key: `eq.${ownerKey}`,
+        code: `eq.${alert.code}`,
+        percent: `eq.${alert.percent}`,
+        direction: `eq.${alert.direction}`
+      }
+    });
+    deleted += 1;
+  }
+  return { deleted };
+};
+
+const buildTieredCostAlertStatus = async (ownerKey) => {
+  const alerts = await getTieredCostAlerts(ownerKey);
+  if (alerts.length === 0) {
+    return "目前沒有成本異常分級提醒。\n可輸入：成本異常分級 15 30 50";
+  }
+
+  const grouped = new Map();
+  for (const alert of alerts) {
+    const key = `${alert.code}:${alert.percent}`;
+    const group = grouped.get(key) || {
+      code: alert.code,
+      percent: alert.percent,
+      upper: null,
+      lower: null
+    };
+    if (alert.direction === "above") group.upper = alert.targetPrice;
+    if (alert.direction === "below") group.lower = alert.targetPrice;
+    grouped.set(key, group);
+  }
+
+  const rows = [...grouped.values()]
+    .sort((a, b) => a.code.localeCompare(b.code) || a.percent - b.percent)
+    .slice(0, 18)
+    .map(
+      (row, index) =>
+        `${index + 1}. ${stockNames[row.code] || row.code}（${row.code}） ${formatMoney(
+          row.percent
+        )}% ${costTierLabel(row.percent)}\n上線：${row.upper ?? "-"} 元｜下線：${
+          row.lower ?? "-"
+        } 元`
+    )
+    .join("\n\n");
+
+  const hidden = grouped.size > 18 ? `\n\n...還有 ${grouped.size - 18} 組` : "";
+  return `📋 成本異常分級狀態
+
+啟用提醒：${alerts.length} 筆
+分級組數：${grouped.size} 組
+
+${rows}${hidden}`;
+};
+
+const checkAndPushTieredCostAlerts = async () => {
+  if (!hasPortfolioDb) {
+    return;
+  }
+
+  let alerts = [];
+  try {
+    alerts = await getAllActiveTieredCostAlerts();
+  } catch (error) {
+    if (error?.response?.status === 404 || error?.response?.data?.code === "PGRST205") {
+      console.log("Tiered cost alerts skipped: cost_band_alerts table is not ready");
+      return;
+    }
+    throw error;
+  }
+
+  if (alerts.length === 0) {
+    return;
+  }
+
+  console.log(`Checking ${alerts.length} tiered cost alerts`);
+
+  for (const alert of alerts) {
+    try {
+      const quote = await fetchAlertYahooQuote(alert.code, 2500);
+      const price = Number(quote.regularMarketPrice);
+      if (!Number.isFinite(price)) {
+        continue;
+      }
+
+      const triggered =
+        alert.direction === "below"
+          ? price <= alert.targetPrice
+          : price >= alert.targetPrice;
+
+      if (!triggered) {
+        continue;
+      }
+
+      await client.pushMessage(alert.ownerKey, {
+        type: "text",
+        text: `🚨 成本異常分級到價
+
+股票：${stockNames[alert.code] || alert.code}（${alert.code}）
+等級：${formatMoney(alert.percent)}% ${costTierLabel(alert.percent)}
+方向：${alert.direction === "above" ? "高於平均成本" : "低於平均成本"}
+現價：${price} 元
+門檻：${alert.targetPrice} 元
+
+此分級提醒已自動關閉；需要再提醒請重新設定。`
+      });
+
+      await deactivateTieredCostAlert(alert.ownerKey, alert);
+    } catch (error) {
+      console.error("Tiered cost alert check failed:", {
+        ownerKey: alert.ownerKey,
+        code: alert.code,
+        percent: alert.percent,
+        direction: alert.direction,
+        error: error.message
+      });
+    }
+  }
 };
 
 const checkAndPushPriceAlerts = async () => {
@@ -2579,6 +2880,130 @@ if (alertRemoveMatch) {
   return client.replyMessage(event.replyToken, {
     type: "text",
     text: `🗑️ 已移除價格提醒：${stockNames[code] || code}（${code}）`
+  });
+}
+
+const tieredCostSetMatch = userMessage.trim().match(/^成本異常分級(?:\s+(.+))?$/);
+if (tieredCostSetMatch) {
+  const percents = parseCostTierPercents(tieredCostSetMatch[1]);
+  if (percents.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入：成本異常分級 15 30 50"
+    });
+  }
+
+  try {
+    const rows = await setupTieredCostAlerts(watchlistKey, percents);
+    if (rows.length === 0) {
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "目前沒有可套用的持股成本，無法建立分級提醒。"
+      });
+    }
+
+    const sample = rows
+      .slice(0, 8)
+      .map(
+        (row, index) =>
+          `${index + 1}. ${stockNames[row.code] || row.code}（${row.code}） ${formatMoney(
+            row.percent
+          )}% ${costTierLabel(row.percent)}\n上線：${row.upperPrice} 元｜下線：${row.lowerPrice} 元`
+      )
+      .join("\n\n");
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `🎯 已建立成本異常分級提醒
+
+分級：${percents.map((percent) => `${formatMoney(percent)}%`).join(" / ")}
+套用持股：${new Set(rows.map((row) => row.code)).size} 檔
+提醒總數：${rows.length * 2} 筆
+
+${sample}${rows.length > 8 ? `\n\n...還有 ${rows.length - 8} 組` : ""}
+
+查看可輸入：成本異常分級查看
+刪除可輸入：成本異常分級刪除`
+    });
+  } catch (error) {
+    if (error?.response?.status === 404 || error?.response?.data?.code === "PGRST205") {
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "資料表還沒建立。請先到 Supabase SQL Editor 執行 cost_band_alerts.sql，再重新輸入：成本異常分級 15 30 50"
+      });
+    }
+    throw error;
+  }
+}
+
+if (userMessage.trim() === "成本異常分級查看") {
+  try {
+    const text = await buildTieredCostAlertStatus(watchlistKey);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text
+    });
+  } catch (error) {
+    if (error?.response?.status === 404 || error?.response?.data?.code === "PGRST205") {
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "資料表還沒建立。請先到 Supabase SQL Editor 執行 cost_band_alerts.sql。"
+      });
+    }
+    throw error;
+  }
+}
+
+const tieredCostDeleteMatch = userMessage.trim().match(/^成本異常分級刪除(?:\s+(.+))?$/);
+if (tieredCostDeleteMatch) {
+  const percents = tieredCostDeleteMatch[1]
+    ? parseCostTierPercents(tieredCostDeleteMatch[1], [])
+    : [];
+  let result;
+  try {
+    result = await deleteTieredCostAlerts(watchlistKey, percents);
+  } catch (error) {
+    if (error?.response?.status === 404 || error?.response?.data?.code === "PGRST205") {
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "資料表還沒建立。請先到 Supabase SQL Editor 執行 cost_band_alerts.sql。"
+      });
+    }
+    throw error;
+  }
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🗑️ 已刪除成本異常分級提醒
+
+刪除範圍：${percents.length ? percents.map((percent) => `${formatMoney(percent)}%`).join(" / ") : "全部分級"}
+處理提醒：約 ${result.deleted} 筆
+
+重建可輸入：成本異常分級 15 30 50`
+  });
+}
+
+const tieredCostRebuildMatch = userMessage.trim().match(/^成本異常分級重建(?:\s+(.+))?$/);
+if (tieredCostRebuildMatch) {
+  const percents = parseCostTierPercents(tieredCostRebuildMatch[1]);
+  let rows;
+  try {
+    await deleteTieredCostAlerts(watchlistKey, percents);
+    rows = await setupTieredCostAlerts(watchlistKey, percents);
+  } catch (error) {
+    if (error?.response?.status === 404 || error?.response?.data?.code === "PGRST205") {
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "資料表還沒建立。請先到 Supabase SQL Editor 執行 cost_band_alerts.sql。"
+      });
+    }
+    throw error;
+  }
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `♻️ 已重建成本異常分級提醒
+
+分級：${percents.map((percent) => `${formatMoney(percent)}%`).join(" / ")}
+套用持股：${new Set(rows.map((row) => row.code)).size} 檔
+提醒總數：${rows.length * 2} 筆`
   });
 }
 
@@ -4742,6 +5167,7 @@ app.get('/', (req, res) => {
 app.get('/alerts/check', async (req, res) => {
   try {
     await checkAndPushPriceAlerts();
+    await checkAndPushTieredCostAlerts();
     res.json({ ok: true });
   } catch (error) {
     console.error("手動觸發價格提醒失敗:", error);
@@ -4790,6 +5216,9 @@ app.listen(PORT, '0.0.0.0', () => {
     setInterval(() => {
       checkAndPushPriceAlerts().catch((error) => {
         console.error("自動價格提醒排程失敗:", error);
+      });
+      checkAndPushTieredCostAlerts().catch((error) => {
+        console.error("Tiered cost alerts auto check failed:", error);
       });
     }, ALERT_CHECK_INTERVAL_MS);
     if (INTRADAY_PUSH_ENABLED && INTRADAY_PUSH_TIMES.length > 0) {
