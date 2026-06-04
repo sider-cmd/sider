@@ -23,6 +23,7 @@ const priceAlerts = new Map();
 const portfolioBackups = new Map();
 const portfolioValueSnapshots = new Map();
 const quoteCache = new Map();
+const intradayBriefPushLog = new Set();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -94,11 +95,41 @@ const estimateSellFee = (amount) => Math.round(amount * 0.001425);
 const estimateSellTax = (amount) => Math.round(amount * 0.003);
 const ALERT_CHECK_INTERVAL_MS =
   Number(process.env.ALERT_CHECK_INTERVAL_MS) || 10 * 60 * 1000;
+const INTRADAY_PUSH_INTERVAL_MS =
+  Number(process.env.INTRADAY_PUSH_INTERVAL_MS) || 60 * 1000;
+const INTRADAY_PUSH_TIMES = (process.env.INTRADAY_PUSH_TIMES || "10:00,12:30,13:20")
+  .split(",")
+  .map((time) => time.trim())
+  .filter(Boolean);
+const INTRADAY_PUSH_ENABLED = process.env.INTRADAY_PUSH_ENABLED !== "false";
 
 const normalizeAlertDirection = (text = "") =>
   text.includes("下") || text.toLowerCase().includes("below") ? "below" : "above";
 
 const alertDirectionLabel = (direction) => (direction === "below" ? "以下" : "以上");
+
+const formatBriefMoney = (value) => Number(value).toFixed(0);
+const formatBriefPercent = (value) => Number(value).toFixed(2);
+const briefSign = (value) => (value > 0 ? "+" : "");
+
+const getTaipeiNow = (date = new Date()) => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(date);
+  const pick = (type) => parts.find((part) => part.type === type)?.value;
+  return {
+    dateKey: `${pick("year")}-${pick("month")}-${pick("day")}`,
+    timeKey: `${pick("hour")}:${pick("minute")}`,
+    weekday: pick("weekday")
+  };
+};
 
 const fetchAlertYahooQuote = async (code, timeoutMs = 2500) => {
   const cacheKey = `alert:${code}`;
@@ -148,6 +179,22 @@ const getPortfolio = async (ownerKey) => {
       }
     ])
   );
+};
+
+const getPortfolioOwnerKeys = async () => {
+  if (!hasPortfolioDb) {
+    return [...portfolios.keys()];
+  }
+
+  const response = await axios.get(portfolioApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      select: "owner_key",
+      limit: 1000
+    }
+  });
+
+  return [...new Set((response.data || []).map((row) => row.owner_key).filter(Boolean))];
 };
 
 const savePortfolioPosition = async (ownerKey, code, position) => {
@@ -847,6 +894,136 @@ const checkAndPushPriceAlerts = async () => {
   }
 };
 
+const buildIntradayPortfolioBrief = async (ownerKey, stockNameLookup = {}) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const snapshots = await Promise.all(
+    entries.map(async ([code, position]) => {
+      try {
+        const quote = await fetchAlertYahooQuote(code, 2500);
+        const price = Number(quote.regularMarketPrice);
+        if (!Number.isFinite(price)) {
+          throw new Error("查無報價");
+        }
+        const costValue = Number(position.averageCost) * Number(position.shares);
+        const marketValue = price * Number(position.shares);
+        const profit = marketValue - costValue;
+        const profitPercent = costValue > 0 ? (profit / costValue) * 100 : 0;
+        return {
+          code,
+          name: stockNameLookup[code] || code,
+          shares: Number(position.shares),
+          price,
+          marketValue,
+          costValue,
+          profit,
+          profitPercent,
+          error: false
+        };
+      } catch {
+        return {
+          code,
+          name: stockNameLookup[code] || code,
+          shares: Number(position.shares),
+          error: true
+        };
+      }
+    })
+  );
+
+  const successful = snapshots.filter((item) => !item.error);
+  if (successful.length === 0) {
+    return `📡 盤中持股快訊
+
+目前持股檔數：${entries.length} 檔
+即時報價暫時查詢失敗，稍後可再輸入「盤中快訊」。`;
+  }
+
+  const totalCost = successful.reduce((sum, item) => sum + item.costValue, 0);
+  const totalMarket = successful.reduce((sum, item) => sum + item.marketValue, 0);
+  const totalProfit = totalMarket - totalCost;
+  const totalPercent = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
+  const topGainers = [...successful]
+    .sort((a, b) => b.profitPercent - a.profitPercent)
+    .slice(0, 3);
+  const topLosers = [...successful]
+    .sort((a, b) => a.profitPercent - b.profitPercent)
+    .slice(0, 3);
+  const topWeights = [...successful]
+    .sort((a, b) => b.marketValue - a.marketValue)
+    .slice(0, 3);
+  const now = getTaipeiNow();
+  const row = (item, index, withProfit = true) =>
+    `${index + 1}. ${item.name}（${item.code}）：${
+      withProfit
+        ? `${briefSign(item.profitPercent)}${formatBriefPercent(
+            item.profitPercent
+          )}%，${briefSign(item.profit)}${formatBriefMoney(item.profit)} 元`
+        : `${formatBriefMoney(item.marketValue)} 元`
+    }`;
+
+  return `📡 盤中持股快訊
+${now.dateKey} ${now.timeKey}
+
+持股檔數：${entries.length} 檔
+總市值：${formatBriefMoney(totalMarket)} 元
+總成本：${formatBriefMoney(totalCost)} 元
+未實現損益：${briefSign(totalProfit)}${formatBriefMoney(totalProfit)} 元
+未實現報酬率：${briefSign(totalPercent)}${formatBriefPercent(totalPercent)}%
+
+表現較強：
+${topGainers.map((item, index) => row(item, index)).join("\n")}
+
+表現較弱：
+${topLosers.map((item, index) => row(item, index)).join("\n")}
+
+市值前三：
+${topWeights.map((item, index) => row(item, index, false)).join("\n")}${
+    snapshots.length - successful.length > 0
+      ? `\n\n提醒：${snapshots.length - successful.length} 檔報價失敗，未列入統計。`
+      : ""
+  }
+
+提醒：這是盤中即時估算，不含尚未入帳的成交與稅費差異。`;
+};
+
+const checkAndPushIntradayBriefs = async (force = false) => {
+  if (!hasPortfolioDb || !INTRADAY_PUSH_ENABLED || INTRADAY_PUSH_TIMES.length === 0) {
+    return;
+  }
+
+  const now = getTaipeiNow();
+  if (!force && (now.weekday === "Sat" || now.weekday === "Sun")) {
+    return;
+  }
+  if (!force && !INTRADAY_PUSH_TIMES.includes(now.timeKey)) {
+    return;
+  }
+
+  const ownerKeys = await getPortfolioOwnerKeys();
+  for (const ownerKey of ownerKeys) {
+    const pushKey = `${now.dateKey}|${now.timeKey}|${ownerKey}`;
+    if (intradayBriefPushLog.has(pushKey)) {
+      continue;
+    }
+
+    const text = await buildIntradayPortfolioBrief(ownerKey);
+    if (!text) {
+      continue;
+    }
+
+    await client.pushMessage(ownerKey, {
+      type: "text",
+      text
+    });
+    intradayBriefPushLog.add(pushKey);
+  }
+};
+
 app.get('/audio', async (req, res) => {
   try {
     const text = String(req.query.text || '').slice(0, 500);
@@ -948,6 +1125,7 @@ async function handleEvent(event) {
 🗑️ 移除提醒：提醒-台積電
 
 🗓️ 今日總結：今日總結
+📡 盤中快訊：盤中快訊
 📌 持股日報：持股日報
 🌇 盤後總結：盤後總結
 
@@ -2883,6 +3061,16 @@ if (userMessage.trim() === "已實現損益") {
   });
 }
 
+if (userMessage.trim() === "盤中快訊" || userMessage.trim() === "持股快訊") {
+  const text = await buildIntradayPortfolioBrief(watchlistKey, stockNames);
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text:
+      text ||
+      "目前沒有持股資料，無法產生盤中快訊。請先輸入「匯入持股」或「持股+台積電 35 2000」。"
+  });
+}
+
 if (
   userMessage.trim() === "今日總結" ||
   userMessage.trim() === "持股日報" ||
@@ -4014,6 +4202,16 @@ app.get('/alerts/check', async (req, res) => {
   }
 });
 
+app.get('/intraday/check', async (req, res) => {
+  try {
+    await checkAndPushIntradayBriefs(true);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("手動觸發盤中持股快訊失敗:", error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
@@ -4033,6 +4231,20 @@ app.listen(PORT, '0.0.0.0', () => {
         console.error("自動價格提醒排程失敗:", error);
       });
     }, ALERT_CHECK_INTERVAL_MS);
+    if (INTRADAY_PUSH_ENABLED && INTRADAY_PUSH_TIMES.length > 0) {
+      console.log(
+        `Intraday portfolio briefs enabled. Times: ${INTRADAY_PUSH_TIMES.join(
+          ", "
+        )}`
+      );
+      setInterval(() => {
+        checkAndPushIntradayBriefs().catch((error) => {
+          console.error("盤中持股快訊排程失敗:", error);
+        });
+      }, INTRADAY_PUSH_INTERVAL_MS);
+    } else {
+      console.log("Intraday portfolio briefs disabled");
+    }
   } else {
     console.log("Auto price alerts disabled: database is not enabled");
   }
