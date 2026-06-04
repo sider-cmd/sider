@@ -1216,78 +1216,36 @@ ${rows}${hidden}`;
 const buildTieredCostAlertSummary = async (ownerKey) => {
   const alerts = await getTieredCostAlerts(ownerKey);
   if (alerts.length === 0) {
-    return "目前沒有成本異常分級提醒。\n可輸入：成本異常分級 15 30 50";
+    return "?????????????\n?????????? 15 30 50";
   }
 
+  const codes = [...new Set(alerts.map((alert) => alert.code))];
   const tierCounts = new Map();
   for (const alert of alerts) {
     const percent = Number(alert.percent);
     tierCounts.set(percent, (tierCounts.get(percent) || 0) + 1);
   }
 
-  const quoteByCode = new Map();
-  const candidates = [];
-  for (const alert of alerts) {
-    try {
-      if (!quoteByCode.has(alert.code)) {
-        const quote = await fetchAlertYahooQuote(alert.code, 2500);
-        quoteByCode.set(alert.code, Number(quote.regularMarketPrice));
-      }
-      const price = quoteByCode.get(alert.code);
-      if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(alert.targetPrice)) {
-        continue;
-      }
-      const distancePercent =
-        (Math.abs(price - Number(alert.targetPrice)) / price) * 100;
-      const directionLabel = alert.direction === "above" ? "上線" : "下線";
-      candidates.push({
-        ...alert,
-        price,
-        distancePercent,
-        directionLabel
-      });
-    } catch {
-      // Ignore quote failures in summary; the full checker will log detailed failures.
-    }
-  }
-
   const tierRows = [...tierCounts.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(
       ([percent, count]) =>
-        `${formatMoney(percent)}% ${costTierLabel(percent)}：${count} 筆`
+        `${formatMoney(percent)}% ${costTierLabel(percent)}?${count} ?`
     )
     .join("\n");
 
-  const nearestRows = candidates
-    .sort((a, b) => a.distancePercent - b.distancePercent)
-    .slice(0, 8)
-    .map(
-      (alert, index) =>
-        `${index + 1}. ${stockNames[alert.code] || alert.code}（${alert.code}） ${formatMoney(
-          alert.percent
-        )}% ${costTierLabel(alert.percent)} ${alert.directionLabel}\n現價：${
-          alert.price
-        } 元｜門檻：${alert.targetPrice} 元｜距離：${formatPercent(
-          alert.distancePercent
-        )}%`
-    )
-    .join("\n\n");
+  return `?? ??????
 
-  return `🎯 成本異常摘要
+?????${alerts.length} ?
+?????${codes.length} ?
 
-啟用提醒：${alerts.length} 筆
-涵蓋股票：${new Set(alerts.map((alert) => alert.code)).size} 檔
-
-分級統計：
+?????
 ${tierRows}
 
-最接近觸發：
-${nearestRows || "目前報價暫時查不到，稍後再試。"}
-
-提醒：距離越小，越接近自動通知。`;
+???????????????????????
+????????????????
+??????????????? 15 30 50`;
 };
-
 const checkAndPushTieredCostAlerts = async () => {
   if (!hasPortfolioDb) {
     return;
