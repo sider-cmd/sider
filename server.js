@@ -372,6 +372,34 @@ const getTrades = async (ownerKey) => {
   }));
 };
 
+const getAllTrades = async (ownerKey) => {
+  if (!hasPortfolioDb) {
+    return portfolioTrades.get(ownerKey) || [];
+  }
+
+  const response = await axios.get(tradeApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`,
+      select: "id,code,trade_type,shares,price,fee,tax,realized_profit,traded_at",
+      order: "traded_at.desc",
+      limit: 1000
+    }
+  });
+
+  return (response.data || []).map((row) => ({
+    id: row.id,
+    code: row.code,
+    type: row.trade_type,
+    shares: Number(row.shares),
+    price: Number(row.price),
+    fee: Number(row.fee || 0),
+    tax: Number(row.tax || 0),
+    realizedProfit: Number(row.realized_profit || 0),
+    tradedAt: row.traded_at
+  }));
+};
+
 const deleteTradeAt = async (ownerKey, index) => {
   const trades = await getTrades(ownerKey);
   const trade = trades[index - 1];
@@ -890,6 +918,7 @@ async function handleEvent(event) {
 ♻️ 還原備份：持股還原
 📸 記錄快照：資產快照
 📆 期間盈虧：月盈虧 / 季盈虧 / 年盈虧
+📊 交易報表：交易月報 / 交易季報 / 交易年報
 🛡️ 風險控管：風險控管
 ⚖️ 再平衡建議：再平衡 / 再平衡 18 保守
 🧮 減碼試算：再平衡試算 由田 100
@@ -1337,6 +1366,160 @@ const formatTradeDate = (value) => {
   return new Date(value).toLocaleDateString("zh-TW");
 };
 
+const parseTradeDate = (value) => {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) {
+    return null;
+  }
+  return {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3])
+  };
+};
+
+const currentQuarter = (month) => Math.floor((month - 1) / 3) + 1;
+
+const tradePeriodRange = (type, input = "") => {
+  const now = new Date();
+  const fallbackYear = now.getFullYear();
+  const fallbackMonth = now.getMonth() + 1;
+  const fallbackQuarter = currentQuarter(fallbackMonth);
+  const text = input.trim();
+
+  if (type === "month") {
+    const match = text.match(/(\d{4})[-/](\d{1,2})/);
+    const year = match ? Number(match[1]) : fallbackYear;
+    const month = match ? Number(match[2]) : fallbackMonth;
+    return {
+      label: `${year}-${String(month).padStart(2, "0")}`,
+      includes: (date) => date.year === year && date.month === month
+    };
+  }
+
+  if (type === "quarter") {
+    const match = text.match(/(\d{4})\s*[Qq季]?\s*([1-4])/);
+    const year = match ? Number(match[1]) : fallbackYear;
+    const quarter = match ? Number(match[2]) : fallbackQuarter;
+    return {
+      label: `${year} Q${quarter}`,
+      includes: (date) =>
+        date.year === year && currentQuarter(date.month) === quarter
+    };
+  }
+
+  const match = text.match(/(\d{4})/);
+  const year = match ? Number(match[1]) : fallbackYear;
+  return {
+    label: `${year}`,
+    includes: (date) => date.year === year
+  };
+};
+
+const topTradeRows = (items, stockNames, limit = 3) =>
+  [...items.values()]
+    .sort((a, b) => b.amount - a.amount)
+    .slice(0, limit)
+    .map(
+      (item, index) =>
+        `${index + 1}. ${stockNames[item.code] || item.code}（${item.code}）：${formatMoney(
+          item.shares
+        )} 股｜${formatMoney(item.amount)} 元`
+    );
+
+const buildTradePeriodReport = async (ownerKey, type, input, stockNames) => {
+  const range = tradePeriodRange(type, input);
+  const trades = await getAllTrades(ownerKey);
+  const matched = trades.filter((trade) => {
+    const date = parseTradeDate(trade.tradedAt);
+    return date && range.includes(date);
+  });
+
+  const reportTitle =
+    type === "month" ? "交易月報" : type === "quarter" ? "交易季報" : "交易年報";
+
+  if (matched.length === 0) {
+    return `📊 ${reportTitle} ${range.label}
+
+目前沒有此期間的交易紀錄。
+
+可用格式：
+交易月報 2026-06
+交易季報 2026 Q2
+交易年報 2026`;
+  }
+
+  const buyByCode = new Map();
+  const sellByCode = new Map();
+  const summary = matched.reduce(
+    (acc, trade) => {
+      const amount = Number(trade.shares) * Number(trade.price);
+      const target = trade.type === "buy" ? buyByCode : sellByCode;
+      const saved = target.get(trade.code) || {
+        code: trade.code,
+        shares: 0,
+        amount: 0
+      };
+      saved.shares += Number(trade.shares || 0);
+      saved.amount += amount;
+      target.set(trade.code, saved);
+
+      acc.fee += Number(trade.fee || 0);
+      acc.tax += Number(trade.tax || 0);
+      if (trade.type === "buy") {
+        acc.buyCount += 1;
+        acc.buyAmount += amount;
+        acc.buyShares += Number(trade.shares || 0);
+      } else {
+        acc.sellCount += 1;
+        acc.sellAmount += amount;
+        acc.sellShares += Number(trade.shares || 0);
+        acc.realizedProfit += Number(trade.realizedProfit || 0);
+      }
+      return acc;
+    },
+    {
+      buyCount: 0,
+      sellCount: 0,
+      buyAmount: 0,
+      sellAmount: 0,
+      buyShares: 0,
+      sellShares: 0,
+      fee: 0,
+      tax: 0,
+      realizedProfit: 0
+    }
+  );
+
+  const netCashFlow = summary.sellAmount - summary.buyAmount - summary.fee - summary.tax;
+  const buyRows = topTradeRows(buyByCode, stockNames);
+  const sellRows = topTradeRows(sellByCode, stockNames);
+
+  return `📊 ${reportTitle} ${range.label}
+
+交易筆數：${matched.length} 筆
+買進：${summary.buyCount} 筆｜${formatMoney(summary.buyShares)} 股｜${formatMoney(
+    summary.buyAmount
+  )} 元
+賣出：${summary.sellCount} 筆｜${formatMoney(summary.sellShares)} 股｜${formatMoney(
+    summary.sellAmount
+  )} 元
+手續費：${formatMoney(summary.fee)} 元
+交易稅：${formatMoney(summary.tax)} 元
+交易現金流：${profitSign(netCashFlow)}${formatMoney(netCashFlow)} 元
+已實現損益：${profitSign(summary.realizedProfit)}${formatMoney(
+    summary.realizedProfit
+  )} 元
+
+買進金額前 3：
+${buyRows.length ? buyRows.join("\n") : "無"}
+
+賣出金額前 3：
+${sellRows.length ? sellRows.join("\n") : "無"}
+
+提醒：已實現損益以交易紀錄中的賣出損益為準；批次匯入若未填賣出損益，會以 0 計。`;
+};
+
 const formatPortfolioSnapshot = (item) => {
   if (item.error) {
     return `${item.name}（${item.code}）：即時損益查詢失敗`;
@@ -1629,6 +1812,27 @@ if (periodProfitMap[userMessage.trim()]) {
   const text = await buildPortfolioPeriodReport(
     watchlistKey,
     periodProfitMap[userMessage.trim()]
+  );
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text
+  });
+}
+
+const tradeReportMatch = userMessage
+  .trim()
+  .match(/^(交易月報|交易季報|交易年報)(?:\s+(.+))?$/);
+if (tradeReportMatch) {
+  const reportTypeMap = {
+    交易月報: "month",
+    交易季報: "quarter",
+    交易年報: "year"
+  };
+  const text = await buildTradePeriodReport(
+    watchlistKey,
+    reportTypeMap[tradeReportMatch[1]],
+    tradeReportMatch[2] || "",
+    stockNames
   );
   return client.replyMessage(event.replyToken, {
     type: "text",
