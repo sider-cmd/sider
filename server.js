@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-04 SUMMARY-CN-FIX-3";
+const BOT_BUILD_VERSION = "2026-06-04 DAILY-REPORT-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -29,6 +29,7 @@ const intradayBriefPushLog = new Set();
 const intradayAnomalyBaselines = new Map();
 const intradayAnomalyPushLog = new Map();
 const intradayAnomalySettings = new Map();
+const dailyReportPushLog = new Set();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -122,6 +123,13 @@ const INTRADAY_STOCK_PROFIT_DELTA =
   Number(process.env.INTRADAY_STOCK_PROFIT_DELTA) || 5000;
 const INTRADAY_TOTAL_PROFIT_DELTA =
   Number(process.env.INTRADAY_TOTAL_PROFIT_DELTA) || 10000;
+const DAILY_REPORT_INTERVAL_MS =
+  Number(process.env.DAILY_REPORT_INTERVAL_MS) || 60 * 1000;
+const DAILY_REPORT_TIMES = (process.env.DAILY_REPORT_TIMES || "14:35")
+  .split(",")
+  .map((time) => time.trim())
+  .filter(Boolean);
+const DAILY_REPORT_ENABLED = process.env.DAILY_REPORT_ENABLED !== "false";
 
 const defaultIntradayAnomalySettings = () => ({
   stockMovePercent: INTRADAY_STOCK_MOVE_PERCENT,
@@ -938,6 +946,191 @@ const getCostBandAlertRows = async (ownerKey, percent = 30) => {
         isSamePrice(alert.targetPrice, row.lowerPrice)
     )
   }));
+};
+
+const dailyReportStockNames = {
+  "00929": "復華台灣科技優息",
+  "1513": "中興電",
+  "1802": "台玻",
+  "2330": "台積電",
+  "2353": "宏碁",
+  "2368": "金像電",
+  "2409": "友達",
+  "2449": "京元電子",
+  "2454": "聯發科",
+  "2812": "台中銀",
+  "2834": "臺企銀",
+  "3037": "欣興",
+  "3455": "由田",
+  "3481": "群創",
+  "3680": "家登",
+  "4132": "國鼎",
+  "6125": "廣運",
+  "6531": "愛普*",
+  "8046": "南電"
+};
+
+const dailyName = (code, fallback) =>
+  dailyReportStockNames[code] || fallback || code;
+
+const dailyMoney = (value) => Number(value || 0).toFixed(0);
+const dailyPercent = (value) => Number(value || 0).toFixed(2);
+const dailySign = (value) => (Number(value) > 0 ? "+" : "");
+
+const getDailyPortfolioSnapshots = async (entries) =>
+  Promise.all(
+    entries.map(async ([code, position]) => {
+      try {
+        const quote = await fetchAlertYahooQuote(code, 2500);
+        const price = Number(quote.regularMarketPrice);
+        if (!Number.isFinite(price)) {
+          throw new Error("price not available");
+        }
+
+        const shares = Number(position.shares || 0);
+        const averageCost = Number(position.averageCost || 0);
+        const costValue = shares * averageCost;
+        const marketValue = shares * price;
+        const profit = marketValue - costValue;
+        const profitPercent = costValue > 0 ? (profit / costValue) * 100 : 0;
+
+        return {
+          code,
+          name: dailyName(code),
+          shares,
+          averageCost,
+          price,
+          costValue,
+          marketValue,
+          profit,
+          profitPercent
+        };
+      } catch {
+        return {
+          code,
+          name: dailyName(code),
+          shares: Number(position.shares || 0),
+          averageCost: Number(position.averageCost || 0),
+          error: true
+        };
+      }
+    })
+  );
+
+const dailyTotals = (snapshots) => {
+  const successful = snapshots.filter((item) => !item.error);
+  const totalCost = successful.reduce((sum, item) => sum + item.costValue, 0);
+  const totalMarket = successful.reduce((sum, item) => sum + item.marketValue, 0);
+  const totalProfit = totalMarket - totalCost;
+  const totalPercent = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
+
+  return {
+    successful,
+    failedCount: snapshots.length - successful.length,
+    totalCost,
+    totalMarket,
+    totalProfit,
+    totalPercent
+  };
+};
+
+const dailyRankRows = (items, valueFormatter, limit = 3) =>
+  items
+    .slice(0, limit)
+    .map((item, index) => `${index + 1}. ${dailyName(item.code, item.name)}（${item.code}）：${valueFormatter(item)}`)
+    .join("\n") || "暫無資料";
+
+const buildDailyAutoPortfolioReport = async (ownerKey) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return "📅 每日自動報告\n\n目前沒有持股資料。";
+  }
+
+  const snapshots = await getDailyPortfolioSnapshots(entries);
+  const totals = dailyTotals(snapshots);
+  const realizedProfit = await getRealizedProfit(ownerKey);
+  const dividendTotal = await getDividendTotal(ownerKey);
+  const alerts = await getPriceAlerts(ownerKey);
+  const totalReturn = totals.totalProfit + realizedProfit + dividendTotal;
+  const now = getTaipeiNow();
+
+  if (totals.successful.length === 0) {
+    return `📅 每日自動報告
+${now.dateKey} ${now.timeKey}
+
+目前即時報價查詢失敗，請稍後再試。`;
+  }
+
+  const strongest = [...totals.successful].sort(
+    (a, b) => b.profitPercent - a.profitPercent
+  );
+  const weakest = [...totals.successful].sort(
+    (a, b) => a.profitPercent - b.profitPercent
+  );
+  const topWeights = [...totals.successful].sort(
+    (a, b) => b.marketValue - a.marketValue
+  );
+
+  return `📅 每日自動報告
+${now.dateKey} ${now.timeKey}
+
+📌 資產概況
+持股檔數：${entries.length} 檔
+總成本：${dailyMoney(totals.totalCost)} 元
+總市值：${dailyMoney(totals.totalMarket)} 元
+未實現損益：${dailySign(totals.totalProfit)}${dailyMoney(totals.totalProfit)} 元
+未實現報酬率：${dailySign(totals.totalPercent)}${dailyPercent(totals.totalPercent)}%
+已實現損益：${dailySign(realizedProfit)}${dailyMoney(realizedProfit)} 元
+股息/股利：${dailyMoney(dividendTotal)} 元
+含股息總收益：${dailySign(totalReturn)}${dailyMoney(totalReturn)} 元
+
+📈 表現較強
+${dailyRankRows(strongest, (item) => `${dailySign(item.profitPercent)}${dailyPercent(item.profitPercent)}%，${dailySign(item.profit)}${dailyMoney(item.profit)} 元`)}
+
+📉 表現較弱
+${dailyRankRows(weakest, (item) => `${dailySign(item.profitPercent)}${dailyPercent(item.profitPercent)}%，${dailySign(item.profit)}${dailyMoney(item.profit)} 元`)}
+
+🏦 市值前三
+${dailyRankRows(topWeights, (item) => `${dailyMoney(item.marketValue)} 元`)}
+
+🔔 提醒
+價格提醒：${alerts.length} 筆
+報價失敗：${totals.failedCount} 檔
+可輸入「異常摘要」查看成本異常提醒。`;
+};
+
+const checkAndPushDailyReports = async (force = false, onlyOwnerKey = null) => {
+  if (!hasPortfolioDb || (!force && (!DAILY_REPORT_ENABLED || DAILY_REPORT_TIMES.length === 0))) {
+    return [];
+  }
+
+  const now = getTaipeiNow();
+  if (!force && (now.weekday === "Sat" || now.weekday === "Sun")) {
+    return [];
+  }
+  if (!force && !DAILY_REPORT_TIMES.includes(now.timeKey)) {
+    return [];
+  }
+
+  const ownerKeys = onlyOwnerKey ? [onlyOwnerKey] : await getPortfolioOwnerKeys();
+  const results = [];
+  for (const ownerKey of ownerKeys) {
+    const pushKey = `${now.dateKey}|${now.timeKey}|daily-report|${ownerKey}`;
+    if (!force && dailyReportPushLog.has(pushKey)) {
+      continue;
+    }
+
+    const text = await buildDailyAutoPortfolioReport(ownerKey);
+    await client.pushMessage(ownerKey, {
+      type: "text",
+      text
+    });
+    dailyReportPushLog.add(pushKey);
+    results.push({ ownerKey, pushed: true });
+  }
+
+  return results;
 };
 
 const deleteCostBandAlerts = async (ownerKey, percent = 30) => {
@@ -2033,6 +2226,59 @@ const watchlistKey =
   event.source?.groupId ||
   event.source?.roomId ||
   "default";
+
+if (["每日報告", "自動日報", "盤後日報"].includes(marketInput)) {
+  try {
+    const report = await buildDailyAutoPortfolioReport(watchlistKey);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: report
+    });
+  } catch (error) {
+    console.error("daily report command failed:", error);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "每日報告產生失敗，請到 Railway Deploy Logs 查看 daily report command failed 後面的錯誤。"
+    });
+  }
+}
+
+if (marketInput === "每日報告設定") {
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `📅 每日自動報告設定
+
+目前啟用：${DAILY_REPORT_ENABLED ? "是" : "否"}
+推送時間：${DAILY_REPORT_TIMES.join(", ") || "未設定"}
+檢查間隔：${Math.round(DAILY_REPORT_INTERVAL_MS / 1000)} 秒
+
+手動查看：每日報告
+手動推送：每日報告推送
+網址測試：/daily-report/check
+
+若要改時間，可在 Railway Variables 設定 DAILY_REPORT_TIMES，例如：
+14:35
+或
+10:00,14:35`
+  });
+}
+
+if (marketInput === "每日報告推送") {
+  try {
+    const results = await checkAndPushDailyReports(true, watchlistKey);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `✅ 已嘗試推送每日報告
+推送筆數：${results.length}`
+    });
+  } catch (error) {
+    console.error("manual daily report push failed:", error);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "每日報告推送失敗，請到 Railway Deploy Logs 查看 manual daily report push failed 後面的錯誤。"
+    });
+  }
+}
 
 const resolveStockCode = (input) => {
   const normalized = input.trim();
@@ -5355,6 +5601,19 @@ app.get('/intraday/check', async (req, res) => {
   }
 });
 
+app.get('/daily-report/check', async (req, res) => {
+  try {
+    const results = await checkAndPushDailyReports(true);
+    res.json({
+      ok: true,
+      pushed: results.length
+    });
+  } catch (error) {
+    console.error("Manual daily report check failed:", error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 app.get('/intraday/anomaly/check', async (req, res) => {
   try {
     const results = await checkAndPushIntradayAnomalies(true);
@@ -5418,6 +5677,20 @@ app.listen(PORT, '0.0.0.0', () => {
       }, INTRADAY_ANOMALY_INTERVAL_MS);
     } else {
       console.log("Intraday anomaly alerts disabled");
+    }
+    if (DAILY_REPORT_ENABLED && DAILY_REPORT_TIMES.length > 0) {
+      console.log(
+        `Daily portfolio reports enabled. Times: ${DAILY_REPORT_TIMES.join(
+          ", "
+        )}`
+      );
+      setInterval(() => {
+        checkAndPushDailyReports().catch((error) => {
+          console.error("Daily portfolio report schedule failed:", error);
+        });
+      }, DAILY_REPORT_INTERVAL_MS);
+    } else {
+      console.log("Daily portfolio reports disabled");
     }
   } else {
     console.log("Auto price alerts disabled: database is not enabled");
