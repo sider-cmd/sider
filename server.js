@@ -2986,7 +2986,7 @@ if (userMessage.trim() === "成本異常分級查看") {
   }
 }
 
-if (userMessage.trim() === "成本異常摘要") {
+if (["成本異常摘要", "異常摘要"].includes(userMessage.trim())) {
   try {
     const text = await buildTieredCostAlertSummary(watchlistKey);
     return client.replyMessage(event.replyToken, {
