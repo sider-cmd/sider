@@ -21,6 +21,7 @@ const portfolioTrades = new Map();
 const portfolioDividends = new Map();
 const priceAlerts = new Map();
 const portfolioBackups = new Map();
+const portfolioValueSnapshots = new Map();
 const quoteCache = new Map();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
@@ -48,6 +49,9 @@ const alertApiUrl = () =>
 
 const backupApiUrl = () =>
   `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/portfolio_backups`;
+
+const valueSnapshotApiUrl = () =>
+  `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/portfolio_value_snapshots`;
 
 const parseOptionalMoney = (text, label) => {
   const match = text.match(new RegExp(`${label}\\s*(\\d+(?:\\.\\d+)?)`));
@@ -850,6 +854,8 @@ async function handleEvent(event) {
 💾 持股備份：持股備份
 📦 查看備份：持股備份查看
 ♻️ 還原備份：持股還原
+📸 記錄快照：資產快照
+📆 期間盈虧：月盈虧 / 季盈虧 / 年盈虧
 🛡️ 風險控管：風險控管
 ⚖️ 再平衡建議：再平衡 / 再平衡 18 保守
 🧮 減碼試算：再平衡試算 由田 100
@@ -1309,6 +1315,277 @@ const portfolioTotals = (snapshots) => {
     totalPercent
   };
 };
+
+const taipeiDateParts = (date = new Date()) => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const pick = (type) => parts.find((part) => part.type === type)?.value;
+  return {
+    year: Number(pick("year")),
+    month: Number(pick("month")),
+    day: Number(pick("day"))
+  };
+};
+
+const dateKey = ({ year, month, day }) =>
+  `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+
+const todayTaipeiDateKey = () => dateKey(taipeiDateParts());
+
+const periodStartDateKey = (period) => {
+  const now = taipeiDateParts();
+  if (period === "year") {
+    return dateKey({ year: now.year, month: 1, day: 1 });
+  }
+  if (period === "quarter") {
+    const quarterStartMonth = Math.floor((now.month - 1) / 3) * 3 + 1;
+    return dateKey({ year: now.year, month: quarterStartMonth, day: 1 });
+  }
+  return dateKey({ year: now.year, month: now.month, day: 1 });
+};
+
+const periodLabel = (period) =>
+  period === "year" ? "今年" : period === "quarter" ? "本季" : "本月";
+
+const savePortfolioValueSnapshot = async (ownerKey) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const snapshots = await getPortfolioSnapshots(entries, {
+    timeoutMs: 2500,
+    raceMs: 3500
+  });
+  const totals = portfolioTotals(snapshots);
+  if (totals.successful.length === 0 || totals.totalMarket <= 0) {
+    return null;
+  }
+
+  const snapshotDate = todayTaipeiDateKey();
+  const row = {
+    snapshotDate,
+    totalCost: totals.totalCost,
+    totalMarket: totals.totalMarket,
+    totalProfit: totals.totalProfit,
+    totalPercent: totals.totalPercent,
+    positions: totals.successful.map((item) => ({
+      code: item.code,
+      name: item.name,
+      shares: item.shares,
+      averageCost: item.averageCost,
+      price: item.price,
+      costValue: item.costValue,
+      marketValue: item.marketValue,
+      profit: item.profit,
+      profitPercent: item.profitPercent
+    })),
+    failedCount: totals.failedCount,
+    createdAt: new Date().toISOString()
+  };
+
+  if (!hasPortfolioDb) {
+    const rows = portfolioValueSnapshots.get(ownerKey) || [];
+    const nextRows = rows.filter((item) => item.snapshotDate !== snapshotDate);
+    nextRows.push(row);
+    portfolioValueSnapshots.set(
+      ownerKey,
+      nextRows.sort((a, b) => a.snapshotDate.localeCompare(b.snapshotDate))
+    );
+    return row;
+  }
+
+  await axios.post(
+    `${valueSnapshotApiUrl()}?on_conflict=owner_key,snapshot_date`,
+    {
+      owner_key: ownerKey,
+      snapshot_date: row.snapshotDate,
+      total_cost: row.totalCost,
+      total_market: row.totalMarket,
+      total_profit: row.totalProfit,
+      total_percent: row.totalPercent,
+      positions: row.positions
+    },
+    {
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      }
+    }
+  );
+
+  return row;
+};
+
+const getPortfolioValueSnapshots = async (ownerKey, startDate, endDate) => {
+  if (!hasPortfolioDb) {
+    return (portfolioValueSnapshots.get(ownerKey) || []).filter(
+      (row) => row.snapshotDate >= startDate && row.snapshotDate <= endDate
+    );
+  }
+
+  const response = await axios.get(valueSnapshotApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`,
+      snapshot_date: `gte.${startDate}`,
+      snapshot_date_lte: `lte.${endDate}`,
+      select:
+        "snapshot_date,total_cost,total_market,total_profit,total_percent,positions,created_at",
+      order: "snapshot_date.asc"
+    },
+    paramsSerializer: (params) =>
+      Object.entries(params)
+        .map(([key, value]) => {
+          const paramKey = key === "snapshot_date_lte" ? "snapshot_date" : key;
+          return `${encodeURIComponent(paramKey)}=${encodeURIComponent(value)}`;
+        })
+        .join("&")
+  });
+
+  return (response.data || []).map((row) => ({
+    snapshotDate: row.snapshot_date,
+    totalCost: Number(row.total_cost),
+    totalMarket: Number(row.total_market),
+    totalProfit: Number(row.total_profit),
+    totalPercent: Number(row.total_percent),
+    positions: Array.isArray(row.positions) ? row.positions : [],
+    createdAt: row.created_at
+  }));
+};
+
+const buildPortfolioPeriodReport = async (ownerKey, period) => {
+  const latestSnapshot = await savePortfolioValueSnapshot(ownerKey);
+  if (!latestSnapshot) {
+    return "目前沒有可記錄的持股快照，可能是沒有持股或即時報價查詢失敗。";
+  }
+
+  const startDate = periodStartDateKey(period);
+  const endDate = todayTaipeiDateKey();
+  const rows = await getPortfolioValueSnapshots(ownerKey, startDate, endDate);
+  if (rows.length < 2) {
+    return `📆 ${periodLabel(period)}持股盈虧
+
+已記錄今日快照：${latestSnapshot.snapshotDate}
+目前總市值：${formatMoney(latestSnapshot.totalMarket)} 元
+目前總成本：${formatMoney(latestSnapshot.totalCost)} 元
+目前未實現損益：${profitSign(latestSnapshot.totalProfit)}${formatMoney(
+      latestSnapshot.totalProfit
+    )} 元（${profitSign(latestSnapshot.totalPercent)}${formatPercent(
+      latestSnapshot.totalPercent
+    )}%）
+
+目前期間內只有 ${rows.length} 筆快照。
+月/季/年盈虧需要至少 2 個不同日期的快照才可比較。
+
+之後每天可輸入「資產快照」或查「月盈虧」自動更新。`;
+  }
+
+  const first = rows[0];
+  const last = rows[rows.length - 1];
+  const marketChange = last.totalMarket - first.totalMarket;
+  const costChange = last.totalCost - first.totalCost;
+  const profitChange = last.totalProfit - first.totalProfit;
+  const percentPointChange = last.totalPercent - first.totalPercent;
+  const marketChangePercent =
+    first.totalMarket > 0 ? (marketChange / first.totalMarket) * 100 : 0;
+  const strongest = [...(last.positions || [])]
+    .sort((a, b) => Number(b.profit || 0) - Number(a.profit || 0))
+    .slice(0, 3)
+    .map(
+      (item, index) =>
+        `${index + 1}. ${item.name || stockNames[item.code] || item.code}（${
+          item.code
+        }）：${profitSign(item.profit)}${formatMoney(item.profit)} 元`
+    )
+    .join("\n");
+  const weakest = [...(last.positions || [])]
+    .sort((a, b) => Number(a.profit || 0) - Number(b.profit || 0))
+    .slice(0, 3)
+    .map(
+      (item, index) =>
+        `${index + 1}. ${item.name || stockNames[item.code] || item.code}（${
+          item.code
+        }）：${profitSign(item.profit)}${formatMoney(item.profit)} 元`
+    )
+    .join("\n");
+
+  return `📆 ${periodLabel(period)}持股盈虧
+
+期間：${first.snapshotDate} → ${last.snapshotDate}
+快照筆數：${rows.length} 筆
+
+總市值：
+${formatMoney(first.totalMarket)} → ${formatMoney(last.totalMarket)} 元
+變化：${profitSign(marketChange)}${formatMoney(marketChange)} 元（${profitSign(
+    marketChangePercent
+  )}${formatPercent(marketChangePercent)}%）
+
+總成本變化：${profitSign(costChange)}${formatMoney(costChange)} 元
+未實現損益變化：${profitSign(profitChange)}${formatMoney(profitChange)} 元
+報酬率變化：${profitSign(percentPointChange)}${formatPercent(
+    percentPointChange
+  )} 個百分點
+
+目前賺最多：
+${strongest || "暫無資料"}
+
+目前拖累最多：
+${weakest || "暫無資料"}
+
+提醒：這是資產快照比較，會受新增持股、減碼、股價變動共同影響。`;
+};
+
+if (userMessage.trim() === "資產快照" || userMessage.trim() === "持股快照") {
+  const snapshot = await savePortfolioValueSnapshot(watchlistKey);
+  if (!snapshot) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前無法建立資產快照，可能是沒有持股或即時報價查詢失敗。"
+    });
+  }
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `📸 已記錄資產快照
+日期：${snapshot.snapshotDate}
+總市值：${formatMoney(snapshot.totalMarket)} 元
+總成本：${formatMoney(snapshot.totalCost)} 元
+未實現損益：${profitSign(snapshot.totalProfit)}${formatMoney(
+      snapshot.totalProfit
+    )} 元（${profitSign(snapshot.totalPercent)}${formatPercent(
+      snapshot.totalPercent
+    )}%）${
+      snapshot.failedCount > 0
+        ? `\n\n提醒：${snapshot.failedCount} 檔報價失敗，未列入快照。`
+        : ""
+    }`
+  });
+}
+
+const periodProfitMap = {
+  月盈虧: "month",
+  持股月盈虧: "month",
+  季盈虧: "quarter",
+  持股季盈虧: "quarter",
+  年盈虧: "year",
+  持股年盈虧: "year"
+};
+if (periodProfitMap[userMessage.trim()]) {
+  const text = await buildPortfolioPeriodReport(
+    watchlistKey,
+    periodProfitMap[userMessage.trim()]
+  );
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text
+  });
+}
 
 if (userMessage.trim() === "持股備份") {
   const backup = await savePortfolioBackup(watchlistKey);
