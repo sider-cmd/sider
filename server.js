@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-04 \u6458\u8981\u8a3a\u65b7\u7248";
+const BOT_BUILD_VERSION = "2026-06-04 \u7570\u5e38\u6458\u8981\u7a69\u5b9a\u7248";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -1215,6 +1215,7 @@ ${rows}${hidden}`;
 };
 
 const buildTieredCostAlertSummary = async (ownerKey) => {
+  const fmt = (value) => Number(value || 0).toFixed(0);
   const portfolio = await getPortfolio(ownerKey);
   const entries = [...portfolio.entries()].filter(([, position]) => {
     const shares = Number(position.shares || 0);
@@ -1228,32 +1229,32 @@ const buildTieredCostAlertSummary = async (ownerKey) => {
 
   const percents = [15, 30, 50];
   const totalAlerts = entries.length * percents.length * 2;
-  const costValues = entries.map(([, position]) => Number(position.shares) * Number(position.averageCost));
-  const totalCost = costValues.reduce((sum, value) => sum + value, 0);
-  const largest = entries
-    .map(([code, position]) => ({
-      code,
-      name: stockNames[code] || code,
-      shares: Number(position.shares),
-      averageCost: Number(position.averageCost),
-      costValue: Number(position.shares) * Number(position.averageCost)
-    }))
+  const rows = entries.map(([code, position]) => ({
+    code,
+    shares: Number(position.shares),
+    averageCost: Number(position.averageCost),
+    costValue: Number(position.shares) * Number(position.averageCost)
+  }));
+  const totalCost = rows.reduce((sum, row) => sum + row.costValue, 0);
+
+  const largest = [...rows]
     .sort((a, b) => b.costValue - a.costValue)
     .slice(0, 5)
     .map(
       (item, index) =>
-        `${index + 1}. ${item.name}?${item.code}???? ${formatMoney(item.averageCost)} ???? ${formatMoney(item.costValue)} ?`
+        `${index + 1}. ${item.code}??? ${fmt(item.averageCost)} ???? ${fmt(item.costValue)} ?`
     )
     .join("\n");
 
   const tierRows = percents
     .map((percent) => {
-      const label = costTierLabel(percent);
-      return `${formatMoney(percent)}% ${label}?${entries.length * 2} ???? ${entries.length} / ?? ${entries.length}?`;
+      const upperCount = entries.length;
+      const lowerCount = entries.length;
+      return `${fmt(percent)}%?${upperCount + lowerCount} ???? ${upperCount} / ?? ${lowerCount}?`;
     })
     .join("\n");
 
-  return `?? ??????\n\n?????????????\n?????${entries.length} ?\n?????${totalAlerts} ?\n??????${formatMoney(totalCost)} ?\n\n?????\n${tierRows}\n\n????? 5?\n${largest}\n\n?????????????????????????\n????????????????`;
+  return `?? ??????\n\n?????????????\n?????${entries.length} ?\n?????${totalAlerts} ?\n??????${fmt(totalCost)} ?\n\n?????\n${tierRows}\n\n????? 5?\n${largest}\n\n???????????????????????\n???????????????`;
 };
 const checkAndPushTieredCostAlerts = async () => {
   if (!hasPortfolioDb) {
