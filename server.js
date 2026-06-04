@@ -937,6 +937,7 @@ async function handleEvent(event) {
 🗑️ 刪除年度股利：年度股利刪除 2026
 🗑️ 刪除股息：股息刪除 5
 📜 交易紀錄：交易紀錄
+📥 匯入狀態：交易匯入狀態
 🎁 股息紀錄：股息紀錄
 💰 已實現損益：已實現損益
 
@@ -1427,6 +1428,59 @@ const topTradeRows = (items, stockNames, limit = 3) =>
         )} 股｜${formatMoney(item.amount)} 元`
     );
 
+const tradeFingerprint = (trade) =>
+  [
+    formatTradeDate(trade.tradedAt),
+    trade.type,
+    trade.code,
+    Number(trade.shares || 0).toFixed(4),
+    Number(trade.price || 0).toFixed(4),
+    Number(trade.fee || 0).toFixed(4),
+    Number(trade.tax || 0).toFixed(4)
+  ].join("|");
+
+const buildTradeImportStatus = async (ownerKey) => {
+  const trades = await getAllTrades(ownerKey);
+  if (trades.length === 0) {
+    return `📥 交易匯入狀態
+
+目前沒有交易紀錄。
+
+可輸入「交易匯入格式」查看批次匯入格式。`;
+  }
+
+  const datedTrades = trades
+    .map((trade) => ({
+      ...trade,
+      dateText: formatTradeDate(trade.tradedAt)
+    }))
+    .filter((trade) => /^\d{4}-\d{2}-\d{2}$/.test(trade.dateText))
+    .sort((a, b) => a.dateText.localeCompare(b.dateText));
+  const firstDate = datedTrades[0]?.dateText || "未知";
+  const lastDate = datedTrades[datedTrades.length - 1]?.dateText || "未知";
+  const currentYear = String(new Date().getFullYear());
+  const buyCount = trades.filter((trade) => trade.type === "buy").length;
+  const sellCount = trades.filter((trade) => trade.type === "sell").length;
+  const thisYearCount = datedTrades.filter((trade) =>
+    trade.dateText.startsWith(currentYear)
+  ).length;
+  const feeTotal = trades.reduce((sum, trade) => sum + Number(trade.fee || 0), 0);
+  const taxTotal = trades.reduce((sum, trade) => sum + Number(trade.tax || 0), 0);
+
+  return `📥 交易匯入狀態
+
+交易總筆數：${trades.length} 筆
+最早交易日：${firstDate}
+最新交易日：${lastDate}
+${currentYear} 年交易：${thisYearCount} 筆
+買進筆數：${buyCount} 筆
+賣出筆數：${sellCount} 筆
+手續費合計：${formatMoney(feeTotal)} 元
+交易稅合計：${formatMoney(taxTotal)} 元
+
+提醒：匯入交易時，完全相同的日期、買賣、代號、股數、價格、手續費、交易稅會自動跳過。`;
+};
+
 const buildTradePeriodReport = async (ownerKey, type, input, stockNames) => {
   const range = tradePeriodRange(type, input);
   const trades = await getAllTrades(ownerKey);
@@ -1840,6 +1894,14 @@ if (tradeReportMatch) {
   });
 }
 
+if (userMessage.trim() === "交易匯入狀態" || userMessage.trim() === "交易狀態") {
+  const text = await buildTradeImportStatus(watchlistKey);
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text
+  });
+}
+
 if (userMessage.trim() === "持股備份") {
   const backup = await savePortfolioBackup(watchlistKey);
   if (!backup) {
@@ -2127,6 +2189,9 @@ if (tradeImportMatch) {
 
   const saved = [];
   const failed = [];
+  const skipped = [];
+  const existingTrades = await getAllTrades(watchlistKey);
+  const fingerprints = new Set(existingTrades.map(tradeFingerprint));
 
   for (const [lineIndex, line] of lines.entries()) {
     const parts = line.split(/\s+/);
@@ -2174,7 +2239,7 @@ if (tradeImportMatch) {
       continue;
     }
 
-    await recordTrade(watchlistKey, {
+    const trade = {
       code,
       type,
       shares,
@@ -2183,7 +2248,15 @@ if (tradeImportMatch) {
       tax,
       realizedProfit,
       tradedAt
-    });
+    };
+    const fingerprint = tradeFingerprint(trade);
+    if (fingerprints.has(fingerprint)) {
+      skipped.push(line);
+      continue;
+    }
+
+    await recordTrade(watchlistKey, trade);
+    fingerprints.add(fingerprint);
 
     const typeLabel = type === "buy" ? "買進" : "賣出";
     saved.push(
@@ -2202,16 +2275,19 @@ if (tradeImportMatch) {
     failed.length > 0
       ? `\n\n未匯入：${failed.length} 筆\n${failed.slice(0, 5).join("\n")}`
       : "";
+  const skippedText =
+    skipped.length > 0 ? `\n\n已跳過重複：${skipped.length} 筆` : "";
 
   return client.replyMessage(event.replyToken, {
     type: "text",
     text: `📥 已匯入交易紀錄：${saved.length} 筆
 
 ${savedText}
+${skippedText}
 ${failedText}
 
 提醒：這只補交易歷史，不會改目前持股。
-輸入「交易紀錄」可查看最新交易。`
+輸入「交易匯入狀態」可查看目前總筆數。`
   });
 }
 
