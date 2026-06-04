@@ -876,42 +876,105 @@ const deletePriceAlert = async (ownerKey, code) => {
 
 const roundPrice = (value) => Math.round(Number(value) * 100) / 100;
 
-const setupCostBandAlerts = async (ownerKey, percent) => {
+const calculateCostBandRows = async (ownerKey, percent = 30) => {
   const portfolio = await getPortfolio(ownerKey);
   const entries = [...portfolio.entries()];
-  if (entries.length === 0) {
-    return [];
-  }
-
   const ratio = Number(percent) / 100;
-  const rows = [];
-  for (const [code, position] of entries) {
-    const averageCost = Number(position.averageCost);
-    if (!Number.isFinite(averageCost) || averageCost <= 0) {
-      continue;
-    }
+  return entries
+    .map(([code, position]) => {
+      const averageCost = Number(position.averageCost);
+      if (!Number.isFinite(averageCost) || averageCost <= 0) {
+        return null;
+      }
+      return {
+        code,
+        averageCost,
+        upperPrice: roundPrice(averageCost * (1 + ratio)),
+        lowerPrice: roundPrice(averageCost * (1 - ratio))
+      };
+    })
+    .filter(Boolean);
+};
 
-    const upperPrice = roundPrice(averageCost * (1 + ratio));
-    const lowerPrice = roundPrice(averageCost * (1 - ratio));
+const setupCostBandAlerts = async (ownerKey, percent) => {
+  const rows = await calculateCostBandRows(ownerKey, percent);
+  for (const row of rows) {
     await savePriceAlert(ownerKey, {
-      code,
+      code: row.code,
       direction: "above",
-      targetPrice: upperPrice
+      targetPrice: row.upperPrice
     });
     await savePriceAlert(ownerKey, {
-      code,
+      code: row.code,
       direction: "below",
-      targetPrice: lowerPrice
-    });
-    rows.push({
-      code,
-      averageCost,
-      upperPrice,
-      lowerPrice
+      targetPrice: row.lowerPrice
     });
   }
 
   return rows;
+};
+
+const getCostBandAlertRows = async (ownerKey, percent = 30) => {
+  const expectedRows = await calculateCostBandRows(ownerKey, percent);
+  const alerts = await getPriceAlerts(ownerKey);
+  const isSamePrice = (a, b) => Math.abs(Number(a) - Number(b)) < 0.01;
+  return expectedRows.map((row) => ({
+    ...row,
+    upperActive: alerts.some(
+      (alert) =>
+        alert.code === row.code &&
+        alert.direction === "above" &&
+        isSamePrice(alert.targetPrice, row.upperPrice)
+    ),
+    lowerActive: alerts.some(
+      (alert) =>
+        alert.code === row.code &&
+        alert.direction === "below" &&
+        isSamePrice(alert.targetPrice, row.lowerPrice)
+    )
+  }));
+};
+
+const deleteCostBandAlerts = async (ownerKey, percent = 30) => {
+  const rows = await calculateCostBandRows(ownerKey, percent);
+  let deleted = 0;
+  for (const row of rows) {
+    if (!hasPortfolioDb) {
+      const alerts = priceAlerts.get(ownerKey) || [];
+      const before = alerts.length;
+      priceAlerts.set(
+        ownerKey,
+        alerts.filter(
+          (alert) =>
+            !(
+              alert.code === row.code &&
+              ((alert.direction === "above" &&
+                Math.abs(Number(alert.targetPrice) - row.upperPrice) < 0.01) ||
+                (alert.direction === "below" &&
+                  Math.abs(Number(alert.targetPrice) - row.lowerPrice) < 0.01))
+            )
+        )
+      );
+      deleted += before - (priceAlerts.get(ownerKey) || []).length;
+      continue;
+    }
+
+    for (const [direction, targetPrice] of [
+      ["above", row.upperPrice],
+      ["below", row.lowerPrice]
+    ]) {
+      await axios.delete(alertApiUrl(), {
+        headers: supabaseHeaders(),
+        params: {
+          owner_key: `eq.${ownerKey}`,
+          code: `eq.${row.code}`,
+          direction: `eq.${direction}`
+        }
+      });
+      deleted += 1;
+    }
+  }
+  return { rows, deleted };
 };
 
 const checkAndPushPriceAlerts = async () => {
@@ -1193,6 +1256,8 @@ async function handleEvent(event) {
 🔔 新增提醒：提醒+台積電 2500 以上
 🔔 停損提醒：提醒+台積電 2200 以下
 🎯 成本異常：成本異常設定 30
+📋 成本異常查看：成本異常查看
+🗑️ 成本異常刪除：成本異常刪除 30
 📋 提醒列表：提醒列表
 🔎 檢查提醒：檢查提醒
 🗑️ 移除提醒：提醒-台積電
@@ -2560,6 +2625,110 @@ ${preview}${
     }
 
 提醒：若股價碰到上緣或下緣，LINE 會自動跳出到價通知，該筆提醒會自動關閉。`
+  });
+}
+
+const costBandViewMatch = userMessage
+  .trim()
+  .match(/^成本異常查看(?:\s+(\d+(?:\.\d+)?))?$/);
+if (costBandViewMatch) {
+  const percent = Number(costBandViewMatch[1] || 30);
+  if (!Number.isFinite(percent) || percent <= 0 || percent >= 100) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入：成本異常查看 30"
+    });
+  }
+
+  const rows = await getCostBandAlertRows(watchlistKey, percent);
+  if (rows.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有持股資料，無法查看成本異常提醒。"
+    });
+  }
+
+  const activeCount = rows.reduce(
+    (sum, row) => sum + (row.upperActive ? 1 : 0) + (row.lowerActive ? 1 : 0),
+    0
+  );
+  const preview = rows
+    .slice(0, 10)
+    .map(
+      (row, index) =>
+        `${index + 1}. ${stockNames[row.code] || row.code}（${row.code}）
+成本：${row.averageCost} 元
+上緣：${row.upperPrice} 元 ${row.upperActive ? "✅" : "未啟用"}
+下緣：${row.lowerPrice} 元 ${row.lowerActive ? "✅" : "未啟用"}`
+    )
+    .join("\n\n");
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `📋 成本異常提醒狀態
+
+檢查區間：平均成本 ±${formatPercent(percent)}%
+持股檔數：${rows.length} 檔
+已啟用提醒：${activeCount} / ${rows.length * 2} 筆
+
+${preview}${
+      rows.length > 10 ? `\n\n...另有 ${rows.length - 10} 檔。` : ""
+    }
+
+重建可輸入：成本異常重建 ${formatMoney(percent)}
+刪除可輸入：成本異常刪除 ${formatMoney(percent)}`
+  });
+}
+
+const costBandDeleteMatch = userMessage
+  .trim()
+  .match(/^成本異常刪除(?:\s+(\d+(?:\.\d+)?))?$/);
+if (costBandDeleteMatch) {
+  const percent = Number(costBandDeleteMatch[1] || 30);
+  if (!Number.isFinite(percent) || percent <= 0 || percent >= 100) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入：成本異常刪除 30"
+    });
+  }
+
+  const result = await deleteCostBandAlerts(watchlistKey, percent);
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🗑️ 已刪除成本異常提醒
+
+刪除區間：平均成本 ±${formatPercent(percent)}%
+套用持股：${result.rows.length} 檔
+已處理提醒：約 ${result.deleted} 筆
+
+若要重新建立，輸入：
+成本異常設定 ${formatMoney(percent)}`
+  });
+}
+
+const costBandRebuildMatch = userMessage
+  .trim()
+  .match(/^成本異常重建(?:\s+(\d+(?:\.\d+)?))?$/);
+if (costBandRebuildMatch) {
+  const percent = Number(costBandRebuildMatch[1] || 30);
+  if (!Number.isFinite(percent) || percent <= 0 || percent >= 100) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入：成本異常重建 30"
+    });
+  }
+
+  await deleteCostBandAlerts(watchlistKey, percent);
+  const rows = await setupCostBandAlerts(watchlistKey, percent);
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `♻️ 已重建成本異常提醒
+
+重建區間：平均成本 ±${formatPercent(percent)}%
+套用持股：${rows.length} 檔
+提醒總數：${rows.length * 2} 筆
+
+可輸入「成本異常查看」確認狀態。`
   });
 }
 
