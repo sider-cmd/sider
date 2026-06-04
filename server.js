@@ -895,6 +895,8 @@ async function handleEvent(event) {
 🧮 減碼試算：再平衡試算 由田 100
 🧾 買進紀錄：買進 台積電 10 2380
 💸 賣出紀錄：賣出 台積電 5 2450
+🧮 買賣試算：買進試算 台積電 10 2380
+🧮 賣出試算：賣出試算 台積電 5 2450
 💰 含費用：買進 台積電 10 2380 手續費20
 💰 含稅費：賣出 台積電 5 2450 手續費20 交易稅36
 📥 匯入交易：交易匯入格式
@@ -1994,6 +1996,110 @@ ${failedText}
 
 提醒：這只補交易歷史，不會改目前持股。
 輸入「交易紀錄」可查看最新交易。`
+  });
+}
+
+const buyTrialMatch = userMessage
+  .trim()
+  .match(/^(買進試算|試算買進)\s*(\S+)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)(?:\s+.*)?$/);
+if (buyTrialMatch) {
+  const code = resolveStockCode(buyTrialMatch[2]);
+  const buyShares = Number(buyTrialMatch[3]);
+  const buyPrice = Number(buyTrialMatch[4]);
+  const buyAmount = buyShares * buyPrice;
+  const fee = parseOptionalMoney(userMessage, "手續費") ?? estimateBuyFee(buyAmount);
+
+  if (!/^\d{4,6}$/.test(code) || buyShares <= 0 || buyPrice <= 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入：買進試算 台積電 10 2380"
+    });
+  }
+
+  const portfolio = await getPortfolio(watchlistKey);
+  const current = portfolio.get(code) || { shares: 0, averageCost: 0 };
+  const newShares = Number(current.shares) + buyShares;
+  const newAverageCost =
+    newShares > 0
+      ? (Number(current.shares) * Number(current.averageCost) + buyAmount + fee) /
+        newShares
+      : buyPrice;
+  const totalPay = buyAmount + fee;
+  const averageCostChange = newAverageCost - Number(current.averageCost || 0);
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🧮 買進前試算：${stockNames[code] || code}（${code}）
+
+試算買進：${formatMoney(buyShares)} 股
+試算價格：${buyPrice} 元
+成交金額：${formatMoney(buyAmount)} 元
+手續費：${formatMoney(fee)} 元
+預估支出：${formatMoney(totalPay)} 元
+
+目前持股：${formatMoney(current.shares || 0)} 股
+目前平均成本：${Number(current.averageCost || 0).toFixed(2)} 元
+試算後持股：${formatMoney(newShares)} 股
+試算後平均成本：${newAverageCost.toFixed(2)} 元
+成本變化：${profitSign(averageCostChange)}${averageCostChange.toFixed(2)} 元
+
+提醒：這只是試算，不會寫入持股或交易紀錄。`
+  });
+}
+
+const sellTrialMatch = userMessage
+  .trim()
+  .match(/^(賣出試算|試算賣出)\s*(\S+)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)(?:\s+.*)?$/);
+if (sellTrialMatch) {
+  const code = resolveStockCode(sellTrialMatch[2]);
+  const sellShares = Number(sellTrialMatch[3]);
+  const sellPrice = Number(sellTrialMatch[4]);
+  const sellAmount = sellShares * sellPrice;
+  const fee = parseOptionalMoney(userMessage, "手續費") ?? estimateSellFee(sellAmount);
+  const tax = parseOptionalMoney(userMessage, "交易稅") ?? estimateSellTax(sellAmount);
+
+  if (!/^\d{4,6}$/.test(code) || sellShares <= 0 || sellPrice <= 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入：賣出試算 台積電 5 2450"
+    });
+  }
+
+  const portfolio = await getPortfolio(watchlistKey);
+  const current = portfolio.get(code);
+  if (!current || Number(current.shares) < sellShares) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `試算失敗：${stockNames[code] || code}（${code}）目前持股不足。`
+    });
+  }
+
+  const costBasis = Number(current.averageCost) * sellShares;
+  const realizedProfit = sellAmount - costBasis - fee - tax;
+  const netReceive = sellAmount - fee - tax;
+  const remainingShares = Number(current.shares) - sellShares;
+  const profitPercent = costBasis > 0 ? (realizedProfit / costBasis) * 100 : 0;
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🧮 賣出前試算：${stockNames[code] || code}（${code}）
+
+試算賣出：${formatMoney(sellShares)} 股
+試算價格：${sellPrice} 元
+成交金額：${formatMoney(sellAmount)} 元
+手續費：${formatMoney(fee)} 元
+交易稅：${formatMoney(tax)} 元
+預估入帳：${formatMoney(netReceive)} 元
+
+目前持股：${formatMoney(current.shares)} 股
+平均成本：${Number(current.averageCost).toFixed(2)} 元
+賣出成本：${formatMoney(costBasis)} 元
+試算損益：${profitSign(realizedProfit)}${formatMoney(realizedProfit)} 元（${profitSign(
+      profitPercent
+    )}${formatPercent(profitPercent)}%）
+剩餘持股：${formatMoney(remainingShares)} 股
+
+提醒：這只是試算，不會寫入持股或交易紀錄。`
   });
 }
 
