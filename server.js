@@ -874,6 +874,46 @@ const deletePriceAlert = async (ownerKey, code) => {
   });
 };
 
+const roundPrice = (value) => Math.round(Number(value) * 100) / 100;
+
+const setupCostBandAlerts = async (ownerKey, percent) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return [];
+  }
+
+  const ratio = Number(percent) / 100;
+  const rows = [];
+  for (const [code, position] of entries) {
+    const averageCost = Number(position.averageCost);
+    if (!Number.isFinite(averageCost) || averageCost <= 0) {
+      continue;
+    }
+
+    const upperPrice = roundPrice(averageCost * (1 + ratio));
+    const lowerPrice = roundPrice(averageCost * (1 - ratio));
+    await savePriceAlert(ownerKey, {
+      code,
+      direction: "above",
+      targetPrice: upperPrice
+    });
+    await savePriceAlert(ownerKey, {
+      code,
+      direction: "below",
+      targetPrice: lowerPrice
+    });
+    rows.push({
+      code,
+      averageCost,
+      upperPrice,
+      lowerPrice
+    });
+  }
+
+  return rows;
+};
+
 const checkAndPushPriceAlerts = async () => {
   if (!hasPortfolioDb) {
     console.log("Auto price alerts skipped: database is not enabled");
@@ -1152,6 +1192,7 @@ async function handleEvent(event) {
 
 🔔 新增提醒：提醒+台積電 2500 以上
 🔔 停損提醒：提醒+台積電 2200 以下
+🎯 成本異常：成本異常設定 30
 📋 提醒列表：提醒列表
 🔎 檢查提醒：檢查提醒
 🗑️ 移除提醒：提醒-台積電
@@ -2473,6 +2514,52 @@ if (alertRemoveMatch) {
   return client.replyMessage(event.replyToken, {
     type: "text",
     text: `🗑️ 已移除價格提醒：${stockNames[code] || code}（${code}）`
+  });
+}
+
+const costBandAlertMatch = userMessage
+  .trim()
+  .match(/^成本異常設定(?:\s+(\d+(?:\.\d+)?))?$/);
+if (costBandAlertMatch) {
+  const percent = Number(costBandAlertMatch[1] || 30);
+  if (!Number.isFinite(percent) || percent <= 0 || percent >= 100) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入：成本異常設定 30"
+    });
+  }
+
+  const rows = await setupCostBandAlerts(watchlistKey, percent);
+  if (rows.length === 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前沒有持股資料，無法建立成本異常提醒。"
+    });
+  }
+
+  const preview = rows
+    .slice(0, 8)
+    .map(
+      (row, index) =>
+        `${index + 1}. ${stockNames[row.code] || row.code}（${row.code}）
+成本：${row.averageCost} 元
+上緣：${row.upperPrice} 元｜下緣：${row.lowerPrice} 元`
+    )
+    .join("\n\n");
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🎯 已建立成本異常提醒
+
+套用持股：${rows.length} 檔
+提醒區間：平均成本 ±${formatPercent(percent)}%
+提醒總數：${rows.length * 2} 筆
+
+${preview}${
+      rows.length > 8 ? `\n\n...另有 ${rows.length - 8} 檔已設定。` : ""
+    }
+
+提醒：若股價碰到上緣或下緣，LINE 會自動跳出到價通知，該筆提醒會自動關閉。`
   });
 }
 
