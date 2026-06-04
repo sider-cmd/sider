@@ -5,6 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
+const BOT_BUILD_VERSION = "2026-06-04 \u6458\u8981\u8a3a\u65b7\u7248";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -1538,6 +1539,106 @@ async function handleEvent(event) {
 
   const userMessage = event.message.text;
   const marketInput = userMessage.trim();
+
+  const textFromCodes = (...codes) => String.fromCharCode(...codes);
+  const cmdVersion = textFromCodes(29256, 26412);
+  const cmdSummaryTest = textFromCodes(25688, 35201, 28204, 35430);
+  const cmdCostSummary = textFromCodes(25104, 26412, 30064, 24120, 25688, 35201);
+  const cmdShortSummary = textFromCodes(30064, 24120, 25688, 35201);
+
+  if (marketInput === cmdVersion) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: textFromCodes(9989, 32, 29256, 26412, 30906, 35469) + "\n" + BOT_BUILD_VERSION + "\n\n" +
+        textFromCodes(22914, 26524, 20320, 30475, 24471, 21040, 36889, 21063, 65292, 20195, 34920, 24050, 37096, 32626, 26368, 26032, 29256)
+    });
+  }
+
+  if (marketInput === cmdSummaryTest) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: textFromCodes(9989, 32, 25688, 35201, 28204, 35430, 32, 79, 75, 65306, 76, 73, 78, 69, 32, 25351, 20196, 26377, 36914, 21040, 26368, 26032, 29256, 31243, 24335)
+    });
+  }
+
+  if ([cmdCostSummary, cmdShortSummary].includes(marketInput)) {
+    const timeout = new Promise((resolve) =>
+      setTimeout(
+        () =>
+          resolve(
+            textFromCodes(9888, 65039, 32, 25104, 26412, 30064, 24120, 25688, 35201, 26597, 35426, 36926, 26178) +
+              "\n\n" +
+              textFromCodes(20195, 34920, 31243, 24335, 26377, 25910, 21040, 25351, 20196, 65292, 20294, 36039, 26009, 24235, 26597, 35426, 22826, 24930, 25110, 32, 83, 117, 112, 97, 98, 97, 115, 101, 32, 26283, 26178, 21345, 20303) +
+              "\n" + textFromCodes(35531, 20808, 36664, 20837, 65306, 25104, 26412, 30064, 24120, 20998, 32026, 26597, 30475) +
+              "\n" + textFromCodes(25110, 31245, 24460, 20877, 35430, 65306, 30064, 24120, 25688, 35201)
+          ),
+        5500
+      )
+    );
+
+    try {
+      const summaryText = await Promise.race([
+        buildTieredCostAlertSummary(event.source?.userId || "default"),
+        timeout
+      ]);
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: summaryText
+      });
+    } catch (error) {
+      console.error("cost alert summary failed:", error);
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text:
+          textFromCodes(9888, 65039, 32, 25104, 26412, 30064, 24120, 25688, 35201, 26597, 35426, 22833, 25943, 65292, 20294, 31243, 24335, 26377, 25910, 21040, 25351, 20196) +
+          "\n" + textFromCodes(35531, 21040, 32, 82, 97, 105, 108, 119, 97, 121, 32, 68, 101, 112, 108, 111, 121, 32, 76, 111, 103, 115, 32, 26597, 30475, 32, 99, 111, 115, 116, 32, 97, 108, 101, 114, 116, 32, 115, 117, 109, 109, 97, 114, 121, 32, 102, 97, 105, 108, 101, 100, 32, 24460, 38754, 30340, 37679, 35492)
+      });
+    }
+  }
+
+  if (marketInput === "??") {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "? ????\n" + BOT_BUILD_VERSION + "\n\n??????????? GitHub/Railway ???????"
+    });
+  }
+
+  if (marketInput === "????") {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "? ???? OK?LINE ???????????"
+    });
+  }
+
+  if (["??????", "????"].includes(marketInput)) {
+    const timeout = new Promise((resolve) =>
+      setTimeout(
+        () =>
+          resolve(
+            "?? ??????????\n\n??????????????????? Supabase ?????\n?????????????\n??????????"
+          ),
+        5500
+      )
+    );
+
+    try {
+      const summaryText = await Promise.race([
+        buildTieredCostAlertSummary(event.source?.userId || "default"),
+        timeout
+      ]);
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: summaryText
+      });
+    } catch (error) {
+      console.error("????????:", error);
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "?? ????????????????????\n?? Railway Deploy Logs ??????????????????"
+      });
+    }
+  }
+
 
   if (marketInput === "指令" || marketInput === "說明") {
     return client.replyMessage(event.replyToken, {
