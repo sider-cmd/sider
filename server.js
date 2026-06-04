@@ -851,7 +851,8 @@ async function handleEvent(event) {
 📦 查看備份：持股備份查看
 ♻️ 還原備份：持股還原
 🛡️ 風險控管：風險控管
-⚖️ 再平衡建議：再平衡 / 再平衡 18
+⚖️ 再平衡建議：再平衡 / 再平衡 18 保守
+🧮 減碼試算：再平衡試算 由田 100
 🧾 買進紀錄：買進 台積電 10 2380
 💸 賣出紀錄：賣出 台積電 5 2450
 💰 含費用：買進 台積電 10 2380 手續費20
@@ -2340,9 +2341,115 @@ ${suggestions.map((item, index) => `${index + 1}. ${item}`).join("\n")}${
   });
 }
 
-const rebalanceMatch = userMessage.trim().match(/^再平衡(?:\s+(\d+(?:\.\d+)?))?$/);
+const rebalanceTrialMatch = userMessage
+  .trim()
+  .match(/^再平衡試算\s+(\S+)\s+(\d+(?:\.\d+)?)$/);
+if (rebalanceTrialMatch) {
+  const code = resolveStockCode(rebalanceTrialMatch[1]);
+  const reduceShares = Number(rebalanceTrialMatch[2]);
+  if (!/^\d{4,6}$/.test(code) || reduceShares <= 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入：再平衡試算 由田 100"
+    });
+  }
+
+  const portfolio = await getPortfolio(watchlistKey);
+  const position = portfolio.get(code);
+  if (!position) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `目前沒有 ${stockNames[code] || code}（${code}）這檔持股。`
+    });
+  }
+  if (reduceShares >= Number(position.shares)) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `試算股數不可大於或等於目前持股。\n目前持有：${formatMoney(
+        position.shares
+      )} 股`
+    });
+  }
+
+  const entries = [...portfolio.entries()];
+  const snapshots = await getPortfolioSnapshots(entries, {
+    timeoutMs: 2500,
+    raceMs: 3500
+  });
+  const totals = portfolioTotals(snapshots);
+  const target = totals.successful.find((item) => item.code === code);
+  if (!target || totals.totalMarket <= 0) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "目前即時報價查詢失敗，暫時無法試算。請稍後再試。"
+    });
+  }
+
+  const reduceValue = reduceShares * target.price;
+  const newTotalMarket = totals.totalMarket - reduceValue;
+  const newTargetShares = Number(position.shares) - reduceShares;
+  const newTargetMarketValue = target.marketValue - reduceValue;
+  const oldWeight = (target.marketValue / totals.totalMarket) * 100;
+  const newWeight =
+    newTotalMarket > 0 ? (newTargetMarketValue / newTotalMarket) * 100 : 0;
+  const adjustedWeights = totals.successful
+    .map((item) => {
+      const marketValue =
+        item.code === code ? newTargetMarketValue : item.marketValue;
+      return {
+        ...item,
+        marketValue,
+        weight: newTotalMarket > 0 ? (marketValue / newTotalMarket) * 100 : 0
+      };
+    })
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, 5)
+    .map(
+      (item, index) =>
+        `${index + 1}. ${item.name}（${item.code}）：${formatPercent(item.weight)}%`
+    )
+    .join("\n");
+
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `🧮 再平衡減碼試算
+
+標的：${target.name}（${target.code}）
+目前持有：${formatMoney(position.shares)} 股
+試算減碼：${formatMoney(reduceShares)} 股
+試算成交價：${target.price} 元
+約釋出資金：${formatMoney(reduceValue)} 元
+
+比重變化：
+${formatPercent(oldWeight)}% → ${formatPercent(newWeight)}%
+剩餘股數：${formatMoney(newTargetShares)} 股
+試算後總市值：${formatMoney(newTotalMarket)} 元
+
+試算後前五大：
+${adjustedWeights}
+
+提醒：這只是試算，不會修改持股或交易紀錄。`
+  });
+}
+
+const rebalanceMatch = userMessage.trim().match(/^再平衡(?:\s+(.+))?$/);
 if (rebalanceMatch) {
-  const maxWeight = rebalanceMatch[1] ? Number(rebalanceMatch[1]) : 20;
+  const args = (rebalanceMatch[1] || "")
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const numberArg = args.find((item) => /^\d+(?:\.\d+)?$/.test(item));
+  const modeArg = args.find((item) => item === "保守" || item === "積極") || "標準";
+  const maxWeight = numberArg ? Number(numberArg) : 20;
+  const allowedArgs = args.every(
+    (item) => /^\d+(?:\.\d+)?$/.test(item) || item === "保守" || item === "積極"
+  );
+  if (!allowedArgs) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入：再平衡、再平衡 18、再平衡 18 保守"
+    });
+  }
   if (maxWeight < 5 || maxWeight > 50) {
     return client.replyMessage(event.replyToken, {
       type: "text",
@@ -2390,8 +2497,20 @@ if (rebalanceMatch) {
         excessShares
       };
     });
+  const candidateMaxWeight = Math.max(5, maxWeight * 0.6);
   const addCandidates = withWeight
-    .filter((item) => item.weight < Math.max(5, maxWeight * 0.6) && item.profitPercent > -30)
+    .filter((item) => {
+      if (item.weight >= candidateMaxWeight) {
+        return false;
+      }
+      if (modeArg === "保守") {
+        return item.profitPercent >= 0;
+      }
+      if (modeArg === "積極") {
+        return item.profitPercent > -10;
+      }
+      return item.profitPercent > -30;
+    })
     .slice(0, 5);
   const avoidAveraging = withWeight
     .filter((item) => item.profitPercent <= -30)
@@ -2441,10 +2560,16 @@ if (rebalanceMatch) {
           )
           .join("\n")
       : "沒有持股虧損超過 30%。";
+  const modeSuggestion =
+    modeArg === "保守"
+      ? "保守模式：只把獲利或至少不虧損的低比重部位列為補比重候選。"
+      : modeArg === "積極"
+      ? "積極模式：允許觀察小幅虧損但未重虧的低比重部位。"
+      : "標準模式：避開重虧股，優先觀察低比重且未嚴重轉弱的部位。";
   const suggestions = [
     `單檔上限先抓 ${formatPercent(maxWeight)}%，超標部位暫停加碼。`,
-    "高虧損股先檢查基本面與停損計畫，不把攤平當第一反應。",
-    "若有新資金，可優先考慮低比重、未重虧、流動性較好的部位。"
+    modeSuggestion,
+    "高虧損股先檢查基本面與停損計畫，不把攤平當第一反應。"
   ];
 
   return client.replyMessage(event.replyToken, {
@@ -2452,6 +2577,7 @@ if (rebalanceMatch) {
     text: `⚖️ 投組再平衡建議
 
 目標單檔上限：${formatPercent(maxWeight)}%
+模式：${modeArg}
 持股檔數：${entries.length} 檔
 總市值：${formatMoney(totals.totalMarket)} 元
 未實現報酬率：${profitSign(totals.totalPercent)}${formatPercent(
