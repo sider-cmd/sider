@@ -1324,6 +1324,18 @@ const getPortfolioSnapshots = async (entries, options = {}) => {
 const formatMoney = (value) => Number(value).toFixed(0);
 const formatPercent = (value) => Number(value).toFixed(2);
 const profitSign = (value) => (value > 0 ? "+" : "");
+const formatTradeDate = (value) => {
+  if (!value) {
+    return "剛剛";
+  }
+
+  const match = String(value).match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) {
+    return match[1];
+  }
+
+  return new Date(value).toLocaleDateString("zh-TW");
+};
 
 const formatPortfolioSnapshot = (item) => {
   if (item.error) {
@@ -2322,9 +2334,7 @@ if (userMessage.trim() === "交易紀錄") {
               trade.tax || 0
             )}`
           : `｜手續費${formatMoney(trade.fee || 0)}`;
-      const date = trade.tradedAt
-        ? new Date(trade.tradedAt).toLocaleString("zh-TW")
-        : "剛剛";
+      const date = formatTradeDate(trade.tradedAt);
 
       return `${index + 1}. ${typeLabel} ${stockNames[trade.code] || trade.code}（${
         trade.code
