@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-05 DAILY-REPORT-MODE-1";
+const BOT_BUILD_VERSION = "2026-06-05 DAILY-REPORT-LINE-SETTINGS-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -30,6 +30,7 @@ const intradayAnomalyBaselines = new Map();
 const intradayAnomalyPushLog = new Map();
 const intradayAnomalySettings = new Map();
 const dailyReportPushLog = new Set();
+const dailyReportSettings = new Map();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -62,6 +63,9 @@ const backupApiUrl = () =>
 
 const valueSnapshotApiUrl = () =>
   `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/portfolio_value_snapshots`;
+
+const dailyReportSettingApiUrl = () =>
+  `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/daily_report_settings`;
 
 const parseOptionalMoney = (text, label) => {
   const match = text.match(new RegExp(`${label}\\s*(\\d+(?:\\.\\d+)?)`));
@@ -432,7 +436,10 @@ const recordTrade = async (ownerKey, trade) => {
       traded_at: tradedAt
     },
     {
-      headers: supabaseHeaders()
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      }
     }
   );
 };
@@ -1050,6 +1057,124 @@ const dailyCompactRankRows = (items, valueFormatter, limit = 3) =>
     )
     .join("\n") || "暫無資料";
 
+const defaultDailyReportSetting = () => ({
+  enabled: DAILY_REPORT_ENABLED,
+  times: DAILY_REPORT_TIMES,
+  mode: DAILY_REPORT_MODE === "full" ? "full" : "compact"
+});
+
+const parseDailyReportTimes = (text) => {
+  const times = String(text || "")
+    .replace(/，/g, ",")
+    .split(/[,\s]+/)
+    .map((time) => time.trim())
+    .filter(Boolean);
+
+  if (times.length === 0) {
+    return null;
+  }
+
+  const normalized = [];
+  for (const time of times) {
+    const match = time.match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) {
+      return null;
+    }
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      return null;
+    }
+    normalized.push(`${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`);
+  }
+
+  return [...new Set(normalized)];
+};
+
+const normalizeDailyReportMode = (text) => {
+  const value = String(text || "").trim().toLowerCase();
+  if (["完整", "full", "f"].includes(value)) {
+    return "full";
+  }
+  if (["精簡", "简洁", "compact", "c"].includes(value)) {
+    return "compact";
+  }
+  return null;
+};
+
+const getDailyReportSetting = async (ownerKey) => {
+  if (!hasPortfolioDb) {
+    return dailyReportSettings.get(ownerKey) || defaultDailyReportSetting();
+  }
+
+  try {
+    const response = await axios.get(dailyReportSettingApiUrl(), {
+      headers: supabaseHeaders(),
+      params: {
+        owner_key: `eq.${ownerKey}`,
+        select: "enabled,times,mode",
+        limit: 1
+      }
+    });
+    const row = (response.data || [])[0];
+    if (!row) {
+      return defaultDailyReportSetting();
+    }
+
+    return {
+      enabled: row.enabled !== false,
+      times: parseDailyReportTimes(row.times) || DAILY_REPORT_TIMES,
+      mode: normalizeDailyReportMode(row.mode) || defaultDailyReportSetting().mode
+    };
+  } catch (error) {
+    if (error.response?.status === 404) {
+      return defaultDailyReportSetting();
+    }
+    throw error;
+  }
+};
+
+const saveDailyReportSetting = async (ownerKey, setting) => {
+  const current = await getDailyReportSetting(ownerKey);
+  const next = {
+    enabled:
+      typeof setting.enabled === "boolean" ? setting.enabled : current.enabled,
+    times: setting.times || current.times,
+    mode: setting.mode || current.mode
+  };
+
+  if (!hasPortfolioDb) {
+    dailyReportSettings.set(ownerKey, next);
+    return next;
+  }
+
+  try {
+    await axios.post(
+      `${dailyReportSettingApiUrl()}?on_conflict=owner_key`,
+      {
+        owner_key: ownerKey,
+        enabled: next.enabled,
+        times: next.times.join(","),
+        mode: next.mode
+      },
+      {
+        headers: {
+          ...supabaseHeaders(),
+          Prefer: "resolution=merge-duplicates,return=minimal"
+        }
+      }
+    );
+  } catch (error) {
+    if (error.response?.status === 404) {
+      dailyReportSettings.set(ownerKey, next);
+      return next;
+    }
+    throw error;
+  }
+
+  return next;
+};
+
 const buildDailyAutoPortfolioReport = async (ownerKey) => {
   const portfolio = await getPortfolio(ownerKey);
   const entries = [...portfolio.entries()];
@@ -1168,7 +1293,7 @@ ${weakRows}
 };
 
 const checkAndPushDailyReports = async (force = false, onlyOwnerKey = null) => {
-  if (!hasPortfolioDb || (!force && (!DAILY_REPORT_ENABLED || DAILY_REPORT_TIMES.length === 0))) {
+  if (!hasPortfolioDb) {
     return [];
   }
 
@@ -1176,20 +1301,24 @@ const checkAndPushDailyReports = async (force = false, onlyOwnerKey = null) => {
   if (!force && (now.weekday === "Sat" || now.weekday === "Sun")) {
     return [];
   }
-  if (!force && !DAILY_REPORT_TIMES.includes(now.timeKey)) {
-    return [];
-  }
-
   const ownerKeys = onlyOwnerKey ? [onlyOwnerKey] : await getPortfolioOwnerKeys();
   const results = [];
   for (const ownerKey of ownerKeys) {
+    const setting = await getDailyReportSetting(ownerKey);
+    if (!force && (!setting.enabled || setting.times.length === 0)) {
+      continue;
+    }
+    if (!force && !setting.times.includes(now.timeKey)) {
+      continue;
+    }
+
     const pushKey = `${now.dateKey}|${now.timeKey}|daily-report|${ownerKey}`;
     if (!force && dailyReportPushLog.has(pushKey)) {
       continue;
     }
 
     const text =
-      DAILY_REPORT_MODE === "full"
+      setting.mode === "full"
         ? await buildDailyAutoPortfolioReport(ownerKey)
         : await buildDailyCompactPortfolioReport(ownerKey);
     await client.pushMessage(ownerKey, {
@@ -2297,6 +2426,58 @@ const watchlistKey =
   event.source?.roomId ||
   "default";
 
+const dailyTimeMatch = marketInput.match(/^每日報告時間\s+(.+)$/);
+if (dailyTimeMatch) {
+  const times = parseDailyReportTimes(dailyTimeMatch[1]);
+  if (!times) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入：每日報告時間 09:00,14:35"
+    });
+  }
+
+  const setting = await saveDailyReportSetting(watchlistKey, { times });
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `✅ 已更新每日報告時間
+推送時間：${setting.times.join(", ")}
+推送模式：${setting.mode === "full" ? "完整" : "精簡"}
+目前啟用：${setting.enabled ? "是" : "否"}`
+  });
+}
+
+const dailyModeMatch = marketInput.match(/^每日報告模式\s+(.+)$/);
+if (dailyModeMatch) {
+  const mode = normalizeDailyReportMode(dailyModeMatch[1]);
+  if (!mode) {
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "格式錯誤。請輸入：每日報告模式 精簡 或 每日報告模式 完整"
+    });
+  }
+
+  const setting = await saveDailyReportSetting(watchlistKey, { mode });
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `✅ 已更新每日報告模式
+推送模式：${setting.mode === "full" ? "完整" : "精簡"}
+推送時間：${setting.times.join(", ") || "未設定"}
+目前啟用：${setting.enabled ? "是" : "否"}`
+  });
+}
+
+if (marketInput === "每日報告開啟" || marketInput === "每日報告關閉") {
+  const setting = await saveDailyReportSetting(watchlistKey, {
+    enabled: marketInput === "每日報告開啟"
+  });
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text: `✅ 已${setting.enabled ? "開啟" : "關閉"}每日自動報告
+推送時間：${setting.times.join(", ") || "未設定"}
+推送模式：${setting.mode === "full" ? "完整" : "精簡"}`
+  });
+}
+
 if (["每日報告", "自動日報", "盤後日報", "每日報告完整"].includes(marketInput)) {
   try {
     const report = await buildDailyAutoPortfolioReport(watchlistKey);
@@ -2330,13 +2511,14 @@ if (marketInput === "每日報告精簡") {
 }
 
 if (marketInput === "每日報告設定") {
+  const setting = await getDailyReportSetting(watchlistKey);
   return client.replyMessage(event.replyToken, {
     type: "text",
     text: `📅 每日自動報告設定
 
-目前啟用：${DAILY_REPORT_ENABLED ? "是" : "否"}
-推送時間：${DAILY_REPORT_TIMES.join(", ") || "未設定"}
-推送模式：${DAILY_REPORT_MODE === "full" ? "完整" : "精簡"}
+目前啟用：${setting.enabled ? "是" : "否"}
+推送時間：${setting.times.join(", ") || "未設定"}
+推送模式：${setting.mode === "full" ? "完整" : "精簡"}
 檢查間隔：${Math.round(DAILY_REPORT_INTERVAL_MS / 1000)} 秒
 
 手動查看：每日報告完整
@@ -2344,10 +2526,12 @@ if (marketInput === "每日報告設定") {
 手動推送：每日報告推送
 網址測試：/daily-report/check
 
-若要改時間，可在 Railway Variables 設定 DAILY_REPORT_TIMES，例如：
-14:35
-或
-10:00,14:35`
+LINE 設定：
+每日報告時間 09:00,14:35
+每日報告模式 精簡
+每日報告模式 完整
+每日報告開啟
+每日報告關閉`
   });
 }
 
@@ -5766,20 +5950,16 @@ app.listen(PORT, '0.0.0.0', () => {
     } else {
       console.log("Intraday anomaly alerts disabled");
     }
-    if (DAILY_REPORT_ENABLED && DAILY_REPORT_TIMES.length > 0) {
-      console.log(
-        `Daily portfolio reports enabled. Times: ${DAILY_REPORT_TIMES.join(
-          ", "
-        )}`
-      );
-      setInterval(() => {
-        checkAndPushDailyReports().catch((error) => {
-          console.error("Daily portfolio report schedule failed:", error);
-        });
-      }, DAILY_REPORT_INTERVAL_MS);
-    } else {
-      console.log("Daily portfolio reports disabled");
-    }
+    console.log(
+      `Daily portfolio report scheduler enabled. Default times: ${DAILY_REPORT_TIMES.join(
+        ", "
+      ) || "none"}`
+    );
+    setInterval(() => {
+      checkAndPushDailyReports().catch((error) => {
+        console.error("Daily portfolio report schedule failed:", error);
+      });
+    }, DAILY_REPORT_INTERVAL_MS);
   } else {
     console.log("Auto price alerts disabled: database is not enabled");
   }
