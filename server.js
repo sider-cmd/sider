@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-04 DAILY-REPORT-1";
+const BOT_BUILD_VERSION = "2026-06-05 DAILY-REPORT-MODE-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -130,6 +130,7 @@ const DAILY_REPORT_TIMES = (process.env.DAILY_REPORT_TIMES || "14:35")
   .map((time) => time.trim())
   .filter(Boolean);
 const DAILY_REPORT_ENABLED = process.env.DAILY_REPORT_ENABLED !== "false";
+const DAILY_REPORT_MODE = (process.env.DAILY_REPORT_MODE || "compact").toLowerCase();
 
 const defaultIntradayAnomalySettings = () => ({
   stockMovePercent: INTRADAY_STOCK_MOVE_PERCENT,
@@ -1040,6 +1041,15 @@ const dailyRankRows = (items, valueFormatter, limit = 3) =>
     .map((item, index) => `${index + 1}. ${dailyName(item.code, item.name)}（${item.code}）：${valueFormatter(item)}`)
     .join("\n") || "暫無資料";
 
+const dailyCompactRankRows = (items, valueFormatter, limit = 3) =>
+  items
+    .slice(0, limit)
+    .map(
+      (item, index) =>
+        `${index + 1}. ${dailyName(item.code, item.name)} (${item.code}): ${valueFormatter(item)}`
+    )
+    .join("\n") || "暫無資料";
+
 const buildDailyAutoPortfolioReport = async (ownerKey) => {
   const portfolio = await getPortfolio(ownerKey);
   const entries = [...portfolio.entries()];
@@ -1100,6 +1110,63 @@ ${dailyRankRows(topWeights, (item) => `${dailyMoney(item.marketValue)} 元`)}
 可輸入「異常摘要」查看成本異常提醒。`;
 };
 
+const buildDailyCompactPortfolioReport = async (ownerKey) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return "📅 每日精簡報告\n\n目前沒有持股資料。";
+  }
+
+  const snapshots = await getDailyPortfolioSnapshots(entries);
+  const totals = dailyTotals(snapshots);
+  const dividendTotal = await getDividendTotal(ownerKey);
+  const alerts = await getPriceAlerts(ownerKey);
+  const now = getTaipeiNow();
+
+  if (totals.successful.length === 0) {
+    return `📅 每日精簡報告
+${now.dateKey} ${now.timeKey}
+
+目前即時報價查詢失敗，請稍後再試。`;
+  }
+
+  const strongest = [...totals.successful]
+    .sort((a, b) => b.profitPercent - a.profitPercent)
+    .slice(0, 3);
+  const weakest = [...totals.successful]
+    .sort((a, b) => a.profitPercent - b.profitPercent)
+    .slice(0, 3);
+  const totalReturn = totals.totalProfit + dividendTotal;
+  const strongRows = dailyCompactRankRows(
+    strongest,
+    (item) =>
+      `${dailySign(item.profitPercent)}${dailyPercent(item.profitPercent)}%，${dailySign(item.profit)}${dailyMoney(item.profit)} 元`
+  );
+  const weakRows = dailyCompactRankRows(
+    weakest,
+    (item) =>
+      `${dailySign(item.profitPercent)}${dailyPercent(item.profitPercent)}%，${dailySign(item.profit)}${dailyMoney(item.profit)} 元`
+  );
+
+  return `📅 每日精簡報告
+${now.dateKey} ${now.timeKey}
+
+總市值：${dailyMoney(totals.totalMarket)} 元
+未實現損益：${dailySign(totals.totalProfit)}${dailyMoney(totals.totalProfit)} 元
+未實現報酬率：${dailySign(totals.totalPercent)}${dailyPercent(totals.totalPercent)}%
+股息/股利：${dailyMoney(dividendTotal)} 元
+含股息收益：${dailySign(totalReturn)}${dailyMoney(totalReturn)} 元
+
+表現較強：
+${strongRows}
+
+表現較弱：
+${weakRows}
+
+提醒：價格提醒 ${alerts.length} 筆，報價失敗 ${totals.failedCount} 檔。
+完整內容可輸入「每日報告完整」。`;
+};
+
 const checkAndPushDailyReports = async (force = false, onlyOwnerKey = null) => {
   if (!hasPortfolioDb || (!force && (!DAILY_REPORT_ENABLED || DAILY_REPORT_TIMES.length === 0))) {
     return [];
@@ -1121,7 +1188,10 @@ const checkAndPushDailyReports = async (force = false, onlyOwnerKey = null) => {
       continue;
     }
 
-    const text = await buildDailyAutoPortfolioReport(ownerKey);
+    const text =
+      DAILY_REPORT_MODE === "full"
+        ? await buildDailyAutoPortfolioReport(ownerKey)
+        : await buildDailyCompactPortfolioReport(ownerKey);
     await client.pushMessage(ownerKey, {
       type: "text",
       text
@@ -2227,7 +2297,7 @@ const watchlistKey =
   event.source?.roomId ||
   "default";
 
-if (["每日報告", "自動日報", "盤後日報"].includes(marketInput)) {
+if (["每日報告", "自動日報", "盤後日報", "每日報告完整"].includes(marketInput)) {
   try {
     const report = await buildDailyAutoPortfolioReport(watchlistKey);
     return client.replyMessage(event.replyToken, {
@@ -2243,6 +2313,22 @@ if (["每日報告", "自動日報", "盤後日報"].includes(marketInput)) {
   }
 }
 
+if (marketInput === "每日報告精簡") {
+  try {
+    const report = await buildDailyCompactPortfolioReport(watchlistKey);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: report
+    });
+  } catch (error) {
+    console.error("daily compact report command failed:", error);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "每日精簡報告產生失敗，請到 Railway Deploy Logs 查看 daily compact report command failed 後面的錯誤。"
+    });
+  }
+}
+
 if (marketInput === "每日報告設定") {
   return client.replyMessage(event.replyToken, {
     type: "text",
@@ -2250,9 +2336,11 @@ if (marketInput === "每日報告設定") {
 
 目前啟用：${DAILY_REPORT_ENABLED ? "是" : "否"}
 推送時間：${DAILY_REPORT_TIMES.join(", ") || "未設定"}
+推送模式：${DAILY_REPORT_MODE === "full" ? "完整" : "精簡"}
 檢查間隔：${Math.round(DAILY_REPORT_INTERVAL_MS / 1000)} 秒
 
-手動查看：每日報告
+手動查看：每日報告完整
+精簡查看：每日報告精簡
 手動推送：每日報告推送
 網址測試：/daily-report/check
 
