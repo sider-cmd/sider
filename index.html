@@ -277,6 +277,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     <button class="tab" data-tab="holdings">持股</button>
     <button class="tab" data-tab="trades">交易</button>
     <button class="tab" data-tab="dividends">股利</button>
+    <button class="tab" data-tab="monthly">月盈虧</button>
     <button class="tab" data-tab="settings">設定</button>
   </div>
 
@@ -464,6 +465,45 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
             <th></th>
           </tr></thead>
           <tbody id="divs-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+
+  <div id="tab-monthly" class="tab-content" style="display:none;">
+    <div class="kpis">
+      <div class="kpi"><div class="kpi-label">本月總盈虧</div><div class="kpi-value" id="monthly-pnl">$0</div></div>
+      <div class="kpi"><div class="kpi-label">本月報酬率</div><div class="kpi-value" id="monthly-return">0.00%</div></div>
+      <div class="kpi"><div class="kpi-label">本月淨投入</div><div class="kpi-value" id="monthly-net-flow">$0</div></div>
+      <div class="kpi"><div class="kpi-label">已實現損益</div><div class="kpi-value" id="monthly-realized">$0</div></div>
+      <div class="kpi"><div class="kpi-label">未實現變化</div><div class="kpi-value" id="monthly-unrealized">$0</div></div>
+      <div class="kpi"><div class="kpi-label">股利收入</div><div class="kpi-value" id="monthly-dividend">$0</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">每月完整盈虧</div>
+        <button class="btn btn-sm btn-ghost" id="export-monthly-pnl-btn">匯出 CSV</button>
+      </div>
+      <div class="note">
+        本表採用現金流調整後盈虧：買進視為投入、賣出視為提領，避免把加碼資金誤算成獲利。需要至少一筆資產快照；可在總覽的資產走勢按「拍照」補今日快照。
+      </div>
+      <div id="monthly-empty" class="empty">尚無足夠快照資料<div class="empty-hint">先更新報價並建立快照，之後會自動累積月盈虧</div></div>
+      <div id="monthly-wrap" class="table-wrap" style="display:none;">
+        <table>
+          <thead><tr>
+            <th>月份</th>
+            <th class="right">月初權益</th>
+            <th class="right">月末權益</th>
+            <th class="right">淨投入</th>
+            <th class="right">已實現</th>
+            <th class="right">未實現變化</th>
+            <th class="right">股利</th>
+            <th class="right">總盈虧</th>
+            <th class="right">報酬率</th>
+          </tr></thead>
+          <tbody id="monthly-tbody"></tbody>
         </table>
       </div>
     </div>
@@ -1327,7 +1367,164 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     });
   }
 
-  function renderAll() { renderOverview(); renderHoldings(); renderTrades(); renderDividends(); renderCustomList(); renderTrend(); }
+
+  function snapshotTotal(s) {
+    return Number(s?.mv || 0) + Number(s?.realized || 0) + Number(s?.dividend || 0);
+  }
+
+  function monthKey(dateText) {
+    return String(dateText || '').slice(0, 7);
+  }
+
+  function monthEndDate(key) {
+    const [year, month] = key.split('-').map(Number);
+    return new Date(year, month, 0).toISOString().slice(0, 10);
+  }
+
+  function currentSnapshotPreview() {
+    const k = computeKpis();
+    if (k.cost === 0 && k.mv === 0) return null;
+    return {
+      date: todayStr(),
+      mv: Math.round(k.mv),
+      cost: Math.round(k.cost),
+      realized: Math.round(k.realized),
+      dividend: Math.round(k.dividends)
+    };
+  }
+
+  function monthlyTradeFlow(month) {
+    return state.trades
+      .filter(t => monthKey(t.date) === month)
+      .reduce((sum, t) => {
+        const amount = Number(t.shares || 0) * Number(t.price || 0);
+        if (t.type === 'buy') return sum + amount + Number(t.fee || 0);
+        return sum - (amount - Number(t.fee || 0) - Number(t.tax || 0));
+      }, 0);
+  }
+
+  function monthlyBuyFlow(month) {
+    return state.trades
+      .filter(t => monthKey(t.date) === month && t.type === 'buy')
+      .reduce((sum, t) => sum + Number(t.shares || 0) * Number(t.price || 0) + Number(t.fee || 0), 0);
+  }
+
+  function buildMonthlyPnlRows() {
+    let snaps = [...state.snapshots];
+    const preview = currentSnapshotPreview();
+    if (preview) {
+      snaps = snaps.filter(s => s.date !== preview.date);
+      snaps.push(preview);
+    }
+    snaps = snaps
+      .filter(s => s.date && Number.isFinite(Number(s.mv)))
+      .sort((a, b) => a.date.localeCompare(b.date));
+    if (snaps.length === 0) return [];
+
+    const months = [...new Set([
+      ...snaps.map(s => monthKey(s.date)),
+      ...state.trades.map(t => monthKey(t.date)),
+      ...state.dividends.map(d => monthKey(d.date))
+    ].filter(Boolean))].sort();
+
+    return months.map(month => {
+      const endDate = monthEndDate(month);
+      const beforeMonth = snaps.filter(s => s.date < month + '-01');
+      const inMonth = snaps.filter(s => monthKey(s.date) === month);
+      const upToMonthEnd = snaps.filter(s => s.date <= endDate);
+      const startSnap = beforeMonth.length ? beforeMonth[beforeMonth.length - 1] : inMonth[0];
+      const endSnap = upToMonthEnd.length ? upToMonthEnd[upToMonthEnd.length - 1] : null;
+      if (!startSnap || !endSnap || monthKey(endSnap.date) < month) return null;
+
+      const startTotal = snapshotTotal(startSnap);
+      const endTotal = snapshotTotal(endSnap);
+      const netFlow = monthlyTradeFlow(month);
+      const buyFlow = monthlyBuyFlow(month);
+      const realized = Number(endSnap.realized || 0) - Number(startSnap.realized || 0);
+      const dividend = Number(endSnap.dividend || 0) - Number(startSnap.dividend || 0);
+      const pnl = endTotal - startTotal - netFlow;
+      const unrealized = pnl - realized - dividend;
+      const capitalBase = startTotal + buyFlow;
+      const returnPct = capitalBase > 0 ? (pnl / capitalBase) * 100 : null;
+
+      return {
+        month,
+        startTotal,
+        endTotal,
+        netFlow,
+        realized,
+        unrealized,
+        dividend,
+        pnl,
+        returnPct,
+        partial: !beforeMonth.length
+      };
+    }).filter(Boolean).sort((a, b) => b.month.localeCompare(a.month));
+  }
+
+  function renderMonthlyPnl() {
+    const rows = buildMonthlyPnlRows();
+    const latest = rows[0];
+    const setMoney = (id, value) => {
+      const el = $(id);
+      el.textContent = fmt(value || 0);
+      el.className = 'kpi-value ' + plClass(value || 0);
+    };
+    setMoney('monthly-pnl', latest?.pnl || 0);
+    const returnEl = $('monthly-return');
+    returnEl.textContent = latest && latest.returnPct !== null ? fmtPct(latest.returnPct) : '0.00%';
+    returnEl.className = 'kpi-value ' + plClass(latest?.returnPct || 0);
+    setMoney('monthly-net-flow', latest?.netFlow || 0);
+    setMoney('monthly-realized', latest?.realized || 0);
+    setMoney('monthly-unrealized', latest?.unrealized || 0);
+    setMoney('monthly-dividend', latest?.dividend || 0);
+
+    if (rows.length === 0) {
+      $('monthly-empty').style.display = 'block';
+      $('monthly-wrap').style.display = 'none';
+      return;
+    }
+    $('monthly-empty').style.display = 'none';
+    $('monthly-wrap').style.display = 'block';
+    $('monthly-tbody').innerHTML = rows.map(row => {
+      const note = row.partial ? ' <span class="dim" title="此月沒有前一月底快照，月初以本月第一筆快照估算">估</span>' : '';
+      const pct = row.returnPct === null ? '-' : fmtPct(row.returnPct);
+      return `<tr>
+        <td>${row.month}${note}</td>
+        <td class="right">${fmt(row.startTotal)}</td>
+        <td class="right">${fmt(row.endTotal)}</td>
+        <td class="right ${plClass(-row.netFlow)}">${fmt(row.netFlow)}</td>
+        <td class="right ${plClass(row.realized)}">${fmt(row.realized)}</td>
+        <td class="right ${plClass(row.unrealized)}">${fmt(row.unrealized)}</td>
+        <td class="right ${plClass(row.dividend)}">${fmt(row.dividend)}</td>
+        <td class="right ${plClass(row.pnl)}">${fmt(row.pnl)}</td>
+        <td class="right ${plClass(row.returnPct || 0)}">${pct}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function exportMonthlyPnlCsv() {
+    const rows = buildMonthlyPnlRows();
+    if (rows.length === 0) { showToast('沒有月盈虧資料可匯出'); return; }
+    const csv = '月份,月初權益,月末權益,淨投入,已實現損益,未實現變化,股利,總盈虧,報酬率\n' + rows.map(r => [
+      r.month,
+      Math.round(r.startTotal),
+      Math.round(r.endTotal),
+      Math.round(r.netFlow),
+      Math.round(r.realized),
+      Math.round(r.unrealized),
+      Math.round(r.dividend),
+      Math.round(r.pnl),
+      r.returnPct === null ? '' : r.returnPct.toFixed(2) + '%'
+    ].join(',')).join('\n');
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'tw_portfolio_monthly_pnl_' + todayStr() + '.csv';
+    a.click(); URL.revokeObjectURL(url);
+  }
+
+  function renderAll() { renderOverview(); renderHoldings(); renderTrades(); renderDividends(); renderMonthlyPnl(); renderCustomList(); renderTrend(); }
 
   function openPriceEditor(sym) {
     editingPriceFor = sym;
@@ -1354,6 +1551,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
     $('tab-' + t.dataset.tab).style.display = 'block';
     if (t.dataset.tab === 'overview') { renderOverview(); renderTrend(); }
+    if (t.dataset.tab === 'monthly') renderMonthlyPnl();
   }));
 
   function bindAutoName(symId, nameId) {
@@ -1739,6 +1937,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     save(); loadCfg(); renderAll();
     showToast('已清除');
   });
+
+  $('export-monthly-pnl-btn').addEventListener('click', exportMonthlyPnlCsv);
 
   // === Init ===
   loadCfg();
