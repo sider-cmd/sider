@@ -526,6 +526,19 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     </div>
 
     <div class="card">
+      <div class="card-title">LINE 助理同步</div>
+      <div class="note">
+        將網頁資產表同步到 LINE 助理使用的資料庫，讓每日報告、盤中快訊與價格提醒使用同一份持股資料。LINE 端更新後，也可以從這裡讀回網頁。
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-sm" id="line-push-btn">同步到 LINE</button>
+        <button class="btn btn-sm btn-ghost" id="line-pull-btn">從 LINE 讀取</button>
+        <button class="btn btn-sm btn-ghost" id="line-status-btn">檢查狀態</button>
+      </div>
+      <div class="muted" id="line-sync-status" style="font-size:12px;margin-top:10px;line-height:1.7;">尚未檢查</div>
+    </div>
+
+    <div class="card">
       <div class="card-title">即時報價設定</div>
       <div class="note">
         資料來源：證交所 + Yahoo Finance（透過 4 個 CORS 代理輪流嘗試）。<br>
@@ -1879,10 +1892,91 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     showToast('已新增', 'down');
   });
 
+  function setLineSyncStatus(text, type) {
+    const el = $('line-sync-status');
+    el.textContent = text;
+    el.style.color = type === 'error' ? 'var(--up)' : type === 'ok' ? 'var(--down)' : 'var(--text-muted)';
+  }
+
+  async function lineSyncRequest(path, options = {}) {
+    const response = await fetch(path, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers || {})
+      }
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false) {
+      throw new Error(data.error || ('HTTP ' + response.status));
+    }
+    return data;
+  }
+
+  async function checkLineSyncStatus() {
+    setLineSyncStatus('檢查中...', 'muted');
+    try {
+      const data = await lineSyncRequest('/api/web-sync/status');
+      setLineSyncStatus(
+        `LINE 資料庫正常｜持股 ${data.holdings} 檔｜交易 ${data.trades} 筆｜股利 ${data.dividends} 筆`,
+        'ok'
+      );
+    } catch (error) {
+      setLineSyncStatus('LINE 同步狀態檢查失敗：' + error.message, 'error');
+    }
+  }
+
+  async function pushWebStateToLine() {
+    if (!confirm('要用目前網頁資產表覆蓋 LINE 助理資料嗎？')) return;
+    setLineSyncStatus('同步到 LINE 中...', 'muted');
+    try {
+      const data = await lineSyncRequest('/api/web-sync/push', {
+        method: 'POST',
+        body: JSON.stringify({ state })
+      });
+      setLineSyncStatus(
+        `已同步到 LINE｜持股 ${data.holdings} 檔｜交易 ${data.trades} 筆｜股利 ${data.dividends} 筆`,
+        'ok'
+      );
+      showToast('已同步到 LINE', 'down');
+    } catch (error) {
+      setLineSyncStatus('同步到 LINE 失敗：' + error.message, 'error');
+      showToast('同步到 LINE 失敗');
+    }
+  }
+
+  async function pullLineStateToWeb() {
+    if (!confirm('要用 LINE 助理資料更新網頁交易與股利嗎？網頁報價、快照與設定會保留。')) return;
+    setLineSyncStatus('從 LINE 讀取中...', 'muted');
+    try {
+      const data = await lineSyncRequest('/api/web-sync/pull');
+      state = {
+        ...state,
+        trades: data.state.trades || [],
+        dividends: data.state.dividends || [],
+        _updatedAt: Date.now()
+      };
+      saveLocal();
+      renderAll();
+      await pushToCloud(true);
+      setLineSyncStatus(
+        `已從 LINE 更新網頁｜交易 ${state.trades.length} 筆｜股利 ${state.dividends.length} 筆`,
+        'ok'
+      );
+      showToast('已從 LINE 更新網頁', 'down');
+    } catch (error) {
+      setLineSyncStatus('從 LINE 讀取失敗：' + error.message, 'error');
+      showToast('從 LINE 讀取失敗');
+    }
+  }
+
   幕後自動備份處理 = () => {}; // 保持本地安全相容
 
   $('force-pull-btn').addEventListener('click', () => pullFromCloud(false));
   $('force-push-btn').addEventListener('click', () => pushToCloud(false));
+  $('line-status-btn').addEventListener('click', checkLineSyncStatus);
+  $('line-push-btn').addEventListener('click', pushWebStateToLine);
+  $('line-pull-btn').addEventListener('click', pullLineStateToWeb);
   $('sync-indicator').addEventListener('click', () => pullFromCloud(false));
 
   $('export-btn').addEventListener('click', () => {
