@@ -5892,6 +5892,22 @@ const parseWebTradeDate = (date) => {
 };
 
 const normalizeWebCode = (value) => String(value || "").trim();
+const DEFAULT_EXCLUDED_WEB_SYMBOLS = { "4132": "國鼎下市" };
+const normalizeExcludedWebSymbols = (value = {}) => {
+  const excluded = { ...DEFAULT_EXCLUDED_WEB_SYMBOLS };
+  if (Array.isArray(value)) {
+    value.forEach((symbol) => {
+      const code = normalizeWebCode(symbol);
+      if (code) excluded[code] = excluded[code] || "排除目前資產";
+    });
+  } else if (value && typeof value === "object") {
+    Object.entries(value).forEach(([symbol, reason]) => {
+      const code = normalizeWebCode(symbol);
+      if (code) excluded[code] = String(reason || excluded[code] || "排除目前資產");
+    });
+  }
+  return excluded;
+};
 
 const normalizeWebTrades = (trades = []) =>
   [...trades]
@@ -5917,6 +5933,8 @@ const normalizeWebTrades = (trades = []) =>
 const buildPortfolioFromWebState = (webState = {}) => {
   const portfolio = new Map();
   const running = new Map();
+  const excludedSymbols = normalizeExcludedWebSymbols(webState.excludedSymbols);
+  const isExcluded = (code) => !!excludedSymbols[normalizeWebCode(code)];
   const normalizedTrades = normalizeWebTrades(webState.trades || []);
   const tradesWithProfit = [];
 
@@ -5963,7 +5981,7 @@ const buildPortfolioFromWebState = (webState = {}) => {
   }
 
   for (const [code, position] of running.entries()) {
-    if (position.shares > 0) {
+    if (position.shares > 0 && !isExcluded(code)) {
       portfolio.set(code, {
         shares: Number(position.shares.toFixed(4)),
         averageCost: Number((position.totalCost / position.shares).toFixed(2))
@@ -6133,6 +6151,7 @@ const buildWebStateFromLine = async (ownerKey) => {
     priceUpdated: {},
     snapshots: [],
     customNames: {},
+    excludedSymbols: normalizeExcludedWebSymbols({}),
     _updatedAt: Date.now()
   };
 };
