@@ -6280,6 +6280,12 @@ app.get('/daily-report/check', async (req, res) => {
 
 app.get('/intraday/anomaly/check', async (req, res) => {
   try {
+    if (typeof checkAndPushIntradayAnomalies !== "function") {
+      return res.status(503).json({
+        ok: false,
+        error: "Intraday anomaly alerts are not available in this build"
+      });
+    }
     const results = await checkAndPushIntradayAnomalies(true);
     res.json({
       ok: true,
@@ -6328,7 +6334,10 @@ app.listen(PORT, '0.0.0.0', () => {
     } else {
       console.log("Intraday portfolio briefs disabled");
     }
-    if (INTRADAY_ANOMALY_ENABLED) {
+    if (
+      INTRADAY_ANOMALY_ENABLED &&
+      typeof checkAndPushIntradayAnomalies === "function"
+    ) {
       console.log(
         `Intraday anomaly alerts enabled. Interval: ${Math.round(
           INTRADAY_ANOMALY_INTERVAL_MS / 1000
