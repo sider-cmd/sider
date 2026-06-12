@@ -539,6 +539,21 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     </div>
 
     <div class="card">
+      <div class="card-title">排除目前資產</div>
+      <div class="note">
+        下市、停牌或不想列入目前資產的股票可以放在這裡。交易紀錄會保留，但總覽、資產配置、報價更新與同步到 LINE 時不會再把它算進目前持股。
+      </div>
+      <div class="form-grid">
+        <div class="field"><label>代號</label><input type="text" id="exclude-symbol" placeholder="4132"></div>
+        <div class="field"><label>原因</label><input type="text" id="exclude-reason" placeholder="下市 / 停牌"></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-sm" id="add-excluded-btn">加入排除</button>
+      </div>
+      <div class="name-pills" id="excluded-list" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="card">
       <div class="card-title">即時報價設定</div>
       <div class="note">
         資料來源：證交所 + Yahoo Finance（透過 4 個 CORS 代理輪流嘗試）。<br>
@@ -618,6 +633,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
 
   const KEY = 'tw_portfolio_v3';
   const DEFAULT_CFG = { feeRate: 0.1425, feeDiscount: 100, feeMin: 20, taxRate: 0.3, autoQuote: true };
+  const DEFAULT_EXCLUDED_SYMBOLS = { '4132': '國鼎下市' };
 
   const STOCK_DB = {
     '2330':'台積電','2303':'聯電','2454':'聯發科','3034':'聯詠','2379':'瑞昱','3711':'日月光投控',
@@ -657,19 +673,41 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   let isSyncing = false;
   let saveDebounceTimer = null;
 
+  function normalizeExcludedSymbols(raw) {
+    const normalized = { ...DEFAULT_EXCLUDED_SYMBOLS };
+    if (Array.isArray(raw)) {
+      raw.forEach(symbol => {
+        const s = String(symbol || '').trim();
+        if (s) normalized[s] = normalized[s] || '排除目前資產';
+      });
+    } else if (raw && typeof raw === 'object') {
+      Object.entries(raw).forEach(([symbol, reason]) => {
+        const s = String(symbol || '').trim();
+        if (s) normalized[s] = String(reason || normalized[s] || '排除目前資產');
+      });
+    }
+    return normalized;
+  }
+
+  function normalizeStateShape(s) {
+    s.trades = s.trades || [];
+    s.dividends = s.dividends || [];
+    s.prices = s.prices || {};
+    s.priceUpdated = s.priceUpdated || {};
+    s.snapshots = s.snapshots || [];
+    s.cfg = { ...DEFAULT_CFG, ...(s.cfg || {}) };
+    s.customNames = s.customNames || {};
+    s.excludedSymbols = normalizeExcludedSymbols(s.excludedSymbols);
+    if (s.cfg.autoQuote === undefined) s.cfg.autoQuote = true;
+    return s;
+  }
+
   function loadLocal() {
     try {
       const raw = localStorage.getItem(KEY);
-      if (raw) {
-        const s = JSON.parse(raw);
-        if (!s.customNames) s.customNames = {};
-        if (!s.priceUpdated) s.priceUpdated = {};
-        if (!s.snapshots) s.snapshots = [];
-        if (s.cfg.autoQuote === undefined) s.cfg.autoQuote = true;
-        return s;
-      }
+      if (raw) return normalizeStateShape(JSON.parse(raw));
     } catch(e) {}
-    return { trades: [], dividends: [], prices: {}, priceUpdated: {}, snapshots: [], cfg: {...DEFAULT_CFG}, customNames: {}, _updatedAt: 0 };
+    return normalizeStateShape({ trades: [], dividends: [], prices: {}, priceUpdated: {}, snapshots: [], cfg: {...DEFAULT_CFG}, customNames: {}, excludedSymbols: {}, _updatedAt: 0 });
   }
   function saveLocal() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch(e) {} }
 
@@ -694,7 +732,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       const cloudTime = cloudData._updatedAt || 0;
       const localTime = state._updatedAt || 0;
       if (cloudTime > localTime) {
-        state = {
+        state = normalizeStateShape({
           trades: cloudData.trades || [],
           dividends: cloudData.dividends || [],
           prices: cloudData.prices || {},
@@ -702,8 +740,9 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
           snapshots: cloudData.snapshots || [],
           cfg: {...DEFAULT_CFG, ...(cloudData.cfg || {})},
           customNames: cloudData.customNames || {},
+          excludedSymbols: cloudData.excludedSymbols || {},
           _updatedAt: cloudTime
-        };
+        });
         saveLocal();
         renderAll();
         if (!silent) showToast('已從雲端下載最新資料', 'down');
@@ -914,7 +953,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   }
 
   async function refreshAllPrices(silent) {
-    const symbols = [...new Set(computeHoldings().filter(h => h.shares > 0).map(h => h.symbol))];
+    const symbols = [...new Set(computeHoldings().filter(h => h.shares > 0 && !isExcludedSymbol(h.symbol)).map(h => h.symbol))];
     if (symbols.length === 0) {
       if (!silent) showToast('沒有持股可更新');
       return;
@@ -996,8 +1035,16 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     return Object.values(by);
   }
 
+  function isExcludedSymbol(symbol) {
+    return !!(state.excludedSymbols && state.excludedSymbols[String(symbol || '').trim()]);
+  }
+
+  function activeHoldings() {
+    return computeHoldings().filter(h => !isExcludedSymbol(h.symbol));
+  }
+
   function computeKpis() {
-    const holdings = computeHoldings();
+    const holdings = activeHoldings();
     let mv = 0, cost = 0, realized = 0;
     for (const h of holdings) {
       mv += h.shares * (state.prices[h.symbol] || 0);
@@ -1005,7 +1052,9 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       realized += h.realized;
     }
     let dividends = 0;
-    for (const d of state.dividends) dividends += d.shares * (d.cash||0) - (d.fee||0) - (d.nhi||0);
+    for (const d of state.dividends) {
+      if (!isExcludedSymbol(d.symbol)) dividends += d.shares * (d.cash||0) - (d.fee||0) - (d.nhi||0);
+    }
     const unrealized = mv - cost;
     const totalReturn = cost > 0 ? ((unrealized + realized + dividends) / cost) * 100 : 0;
     return { holdings, mv, cost, realized, unrealized, dividends, totalReturn };
@@ -1063,7 +1112,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   }
 
   function renderHoldings() {
-    const hs = computeHoldings().filter(h => h.shares > 0);
+    const hs = activeHoldings().filter(h => h.shares > 0);
     if (hs.length === 0) { $('holdings-empty').style.display = 'block'; $('holdings-wrap').style.display = 'none'; return; }
     $('holdings-empty').style.display = 'none'; $('holdings-wrap').style.display = 'block';
     $('holdings-tbody').innerHTML = hs.map(h => {
@@ -1203,6 +1252,23 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     $('custom-list').innerHTML = entries.map(([s,n]) => `<span class="name-pill">${s} ${n}<button data-symbol="${s}">×</button></span>`).join('');
     $('custom-list').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
       delete state.customNames[b.dataset.symbol]; save(); renderCustomList();
+    }));
+  }
+
+  function renderExcludedList() {
+    const entries = Object.entries(state.excludedSymbols || {});
+    if (entries.length === 0) {
+      $('excluded-list').innerHTML = '<span class="dim">尚未排除</span>';
+      return;
+    }
+    $('excluded-list').innerHTML = entries.map(([s, reason]) => {
+      const label = lookupName(s) || '';
+      return `<span class="name-pill">${s} ${label} ${reason ? '(' + reason + ')' : ''}<button data-symbol="${s}">×</button></span>`;
+    }).join('');
+    $('excluded-list').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+      delete state.excludedSymbols[b.dataset.symbol];
+      save();
+      renderAll();
     }));
   }
 
@@ -1537,7 +1603,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     a.click(); URL.revokeObjectURL(url);
   }
 
-  function renderAll() { renderOverview(); renderHoldings(); renderTrades(); renderDividends(); renderMonthlyPnl(); renderCustomList(); renderTrend(); }
+  function renderAll() { renderOverview(); renderHoldings(); renderTrades(); renderDividends(); renderMonthlyPnl(); renderCustomList(); renderExcludedList(); renderTrend(); }
 
   function openPriceEditor(sym) {
     editingPriceFor = sym;
@@ -1892,6 +1958,18 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     showToast('已新增', 'down');
   });
 
+  $('add-excluded-btn').addEventListener('click', () => {
+    const s = $('exclude-symbol').value.trim();
+    const reason = $('exclude-reason').value.trim() || '排除目前資產';
+    if (!s) { showToast('請填寫股票代號'); return; }
+    state.excludedSymbols[s] = reason;
+    save();
+    $('exclude-symbol').value = '';
+    $('exclude-reason').value = '';
+    renderAll();
+    showToast('已加入排除清單', 'down');
+  });
+
   function setLineSyncStatus(text, type) {
     const el = $('line-sync-status');
     el.textContent = text;
@@ -1994,7 +2072,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       try {
         const d = JSON.parse(ev.target.result);
         if (!d.trades || !d.dividends) { showToast('檔案格式錯誤'); return; }
-        state = { trades: d.trades||[], dividends: d.dividends||[], prices: d.prices||{}, priceUpdated: d.priceUpdated||{}, snapshots: d.snapshots||[], cfg: {...DEFAULT_CFG, ...(d.cfg||{})}, customNames: d.customNames||{}, _updatedAt: Date.now() };
+        state = normalizeStateShape({ trades: d.trades||[], dividends: d.dividends||[], prices: d.prices||{}, priceUpdated: d.priceUpdated||{}, snapshots: d.snapshots||[], cfg: {...DEFAULT_CFG, ...(d.cfg||{})}, customNames: d.customNames||{}, excludedSymbols: d.excludedSymbols || {}, _updatedAt: Date.now() });
         save(); loadCfg(); renderAll();
         showToast('匯入成功，正在同步至雲端', 'down');
       } catch(err) { showToast('匯入失敗：' + err.message); }
@@ -2018,7 +2096,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         { id:'sd4', date:'2025-08-20', symbol:'2317', name:'鴻海', year:2025, shares:3000, cash:5.8, stock:0 },
       ],
       prices: {}, priceUpdated: {}, snapshots: [],
-      cfg: {...DEFAULT_CFG}, customNames: {},
+      cfg: {...DEFAULT_CFG}, customNames: {}, excludedSymbols: {},
       _updatedAt: Date.now()
     };
     save(); loadCfg(); renderAll();
