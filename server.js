@@ -5852,6 +5852,291 @@ if (isAnalysisQuery) {
 }
 
 // =================【3. 網頁靜態檔案處理】=================
+app.use(express.json({ limit: "2mb" }));
+
+const requireWebSyncToken = (req, res, next) => {
+  const token = process.env.WEB_SYNC_TOKEN;
+  if (!token) {
+    return next();
+  }
+  const provided =
+    req.headers["x-sync-token"] || req.query.token || req.body?.syncToken;
+  if (provided !== token) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
+  return next();
+};
+
+const getWebSyncOwnerKey = async () => {
+  const configured =
+    process.env.WEB_SYNC_OWNER_KEY ||
+    process.env.LINE_USER_ID ||
+    process.env.LINE_OWNER_KEY;
+  if (configured) {
+    return configured;
+  }
+
+  const ownerKeys = await getPortfolioOwnerKeys();
+  if (ownerKeys.length === 1) {
+    return ownerKeys[0];
+  }
+  if (ownerKeys.length === 0) {
+    throw new Error("找不到 LINE 使用者資料。請先在 LINE 輸入「我的持股」或「持股+台積電 1 100」。");
+  }
+  throw new Error("Supabase 有多個 LINE 使用者，請在 Railway 設定 WEB_SYNC_OWNER_KEY。");
+};
+
+const parseWebTradeDate = (date) => {
+  const parsed = parseHistoricalTradeDate(date);
+  return parsed || new Date().toISOString();
+};
+
+const normalizeWebCode = (value) => String(value || "").trim();
+
+const normalizeWebTrades = (trades = []) =>
+  [...trades]
+    .filter((trade) => trade && trade.symbol && trade.type)
+    .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")))
+    .map((trade) => ({
+      code: normalizeWebCode(trade.symbol),
+      name: trade.name || dailyName(normalizeWebCode(trade.symbol)),
+      type: trade.type === "sell" ? "sell" : "buy",
+      shares: Number(trade.shares || 0),
+      price: Number(trade.price || 0),
+      fee: Number(trade.fee || 0),
+      tax: Number(trade.tax || 0),
+      tradedAt: parseWebTradeDate(trade.date)
+    }))
+    .filter(
+      (trade) =>
+        /^\d{4,6}$/.test(trade.code) &&
+        trade.shares > 0 &&
+        trade.price > 0
+    );
+
+const buildPortfolioFromWebState = (webState = {}) => {
+  const portfolio = new Map();
+  const running = new Map();
+  const normalizedTrades = normalizeWebTrades(webState.trades || []);
+  const tradesWithProfit = [];
+
+  for (const trade of normalizedTrades) {
+    const current = running.get(trade.code) || {
+      shares: 0,
+      totalCost: 0
+    };
+
+    if (trade.type === "buy") {
+      current.shares += trade.shares;
+      current.totalCost += trade.shares * trade.price + trade.fee;
+      tradesWithProfit.push({ ...trade, realizedProfit: 0 });
+    } else {
+      const sellShares = Math.min(trade.shares, current.shares);
+      const averageCost =
+        current.shares > 0 ? current.totalCost / current.shares : 0;
+      const realizedProfit =
+        sellShares * trade.price - trade.fee - trade.tax - averageCost * sellShares;
+      current.shares -= sellShares;
+      current.totalCost -= averageCost * sellShares;
+      if (current.shares <= 0.000001) {
+        current.shares = 0;
+        current.totalCost = 0;
+      }
+      tradesWithProfit.push({ ...trade, realizedProfit });
+    }
+
+    running.set(trade.code, current);
+  }
+
+  for (const dividend of webState.dividends || []) {
+    const code = normalizeWebCode(dividend.symbol);
+    const current = running.get(code);
+    if (!current) {
+      continue;
+    }
+    const stockShares =
+      (Number(dividend.shares || 0) * Number(dividend.stock || 0)) / 10;
+    if (stockShares > 0) {
+      current.shares += stockShares;
+      running.set(code, current);
+    }
+  }
+
+  for (const [code, position] of running.entries()) {
+    if (position.shares > 0) {
+      portfolio.set(code, {
+        shares: Number(position.shares.toFixed(4)),
+        averageCost: Number((position.totalCost / position.shares).toFixed(2))
+      });
+    }
+  }
+
+  return { portfolio, trades: tradesWithProfit };
+};
+
+const replaceTradesFromWeb = async (ownerKey, trades) => {
+  if (!hasPortfolioDb) {
+    portfolioTrades.set(
+      ownerKey,
+      trades.map((trade) => ({ ...trade }))
+    );
+    return;
+  }
+
+  await axios.delete(tradeApiUrl(), {
+    headers: supabaseHeaders(),
+    params: { owner_key: `eq.${ownerKey}` }
+  });
+
+  const rows = trades.map((trade) => ({
+    owner_key: ownerKey,
+    code: trade.code,
+    trade_type: trade.type,
+    shares: trade.shares,
+    price: trade.price,
+    fee: trade.fee || 0,
+    tax: trade.tax || 0,
+    realized_profit: Number(trade.realizedProfit || 0),
+    traded_at: trade.tradedAt
+  }));
+
+  if (rows.length > 0) {
+    await axios.post(tradeApiUrl(), rows, {
+      headers: supabaseHeaders()
+    });
+  }
+};
+
+const normalizeWebDividends = (dividends = []) =>
+  dividends
+    .filter((dividend) => dividend && dividend.symbol)
+    .map((dividend) => {
+      const code = normalizeWebCode(dividend.symbol);
+      const cashTotal =
+        Number(dividend.shares || 0) * Number(dividend.cash || 0);
+      const amount =
+        cashTotal - Number(dividend.fee || 0) - Number(dividend.nhi || 0);
+      return {
+        code,
+        amount: Number(amount.toFixed(0)),
+        note: [
+          dividend.year ? `${dividend.year} 年度` : "",
+          dividend.name || dailyName(code),
+          Number(dividend.stock || 0) > 0
+            ? `股票股利 ${dividend.stock} 股/10股`
+            : ""
+        ]
+          .filter(Boolean)
+          .join(" ")
+      };
+    })
+    .filter((dividend) => /^\d{4,6}$/.test(dividend.code) && dividend.amount !== 0);
+
+const replaceDividendsFromWeb = async (ownerKey, dividends) => {
+  if (!hasPortfolioDb) {
+    portfolioDividends.set(
+      ownerKey,
+      dividends.map((dividend) => ({
+        ...dividend,
+        receivedAt: new Date().toISOString()
+      }))
+    );
+    return;
+  }
+
+  await axios.delete(dividendApiUrl(), {
+    headers: supabaseHeaders(),
+    params: { owner_key: `eq.${ownerKey}` }
+  });
+
+  const rows = dividends.map((dividend) => ({
+    owner_key: ownerKey,
+    code: dividend.code,
+    amount: dividend.amount,
+    note: dividend.note || ""
+  }));
+
+  if (rows.length > 0) {
+    await axios.post(dividendApiUrl(), rows, {
+      headers: supabaseHeaders()
+    });
+  }
+};
+
+const getAllDividendsForWeb = async (ownerKey) => {
+  if (!hasPortfolioDb) {
+    return portfolioDividends.get(ownerKey) || [];
+  }
+
+  const response = await axios.get(dividendApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${ownerKey}`,
+      select: "id,code,amount,note,received_at",
+      order: "received_at.desc",
+      limit: 1000
+    }
+  });
+
+  return response.data || [];
+};
+
+const buildWebStateFromLine = async (ownerKey) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const trades = await getAllTrades(ownerKey);
+  const dividends = await getAllDividendsForWeb(ownerKey);
+
+  const webTrades =
+    trades.length > 0
+      ? trades.map((trade) => ({
+          id: `line_${trade.id || `${trade.code}_${trade.tradedAt}`}`,
+          date: String(trade.tradedAt || new Date().toISOString()).slice(0, 10),
+          type: trade.type,
+          symbol: trade.code,
+          name: dailyName(trade.code),
+          shares: Number(trade.shares || 0),
+          price: Number(trade.price || 0),
+          fee: Number(trade.fee || 0),
+          tax: Number(trade.tax || 0)
+        }))
+      : [...portfolio.entries()].map(([code, position]) => ({
+          id: `line_position_${code}`,
+          date: new Date().toISOString().slice(0, 10),
+          type: "buy",
+          symbol: code,
+          name: dailyName(code),
+          shares: Number(position.shares || 0),
+          price: Number(position.averageCost || 0),
+          fee: 0,
+          tax: 0
+        }));
+
+  const webDividends = dividends.map((dividend) => ({
+    id: `line_dividend_${dividend.id || `${dividend.code}_${dividend.received_at}`}`,
+    date: String(dividend.received_at || new Date().toISOString()).slice(0, 10),
+    symbol: dividend.code,
+    name: dailyName(dividend.code),
+    year:
+      String(dividend.note || "").match(/\d{4}/)?.[0] ||
+      new Date(dividend.received_at || Date.now()).getFullYear(),
+    shares: 1,
+    cash: Number(dividend.amount || 0),
+    stock: 0,
+    fee: 0,
+    nhi: 0
+  }));
+
+  return {
+    trades: webTrades,
+    dividends: webDividends,
+    prices: {},
+    priceUpdated: {},
+    snapshots: [],
+    customNames: {},
+    _updatedAt: Date.now()
+  };
+};
+
 app.use(express.static(__dirname));
 
 app.get('/health', (req, res) => {
@@ -5860,6 +6145,80 @@ app.get('/health', (req, res) => {
     version: BOT_BUILD_VERSION,
     portfolioDb: hasPortfolioDb
   });
+});
+
+app.get('/api/web-sync/status', requireWebSyncToken, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const portfolio = await getPortfolio(ownerKey);
+    const trades = await getAllTrades(ownerKey);
+    const dividends = await getAllDividendsForWeb(ownerKey);
+    res.json({
+      ok: true,
+      portfolioDb: hasPortfolioDb,
+      ownerKeyMasked: `${ownerKey.slice(0, 6)}...${ownerKey.slice(-4)}`,
+      holdings: portfolio.size,
+      trades: trades.length,
+      dividends: dividends.length
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.post('/api/web-sync/push', requireWebSyncToken, async (req, res) => {
+  try {
+    if (!hasPortfolioDb) {
+      return res.status(400).json({
+        ok: false,
+        error: "Supabase 尚未啟用，無法同步到 LINE。"
+      });
+    }
+
+    const ownerKey = await getWebSyncOwnerKey();
+    const webState = req.body?.state || req.body || {};
+    const { portfolio, trades } = buildPortfolioFromWebState(webState);
+    const dividends = normalizeWebDividends(webState.dividends || []);
+
+    await replacePortfolio(ownerKey, portfolio);
+    await replaceTradesFromWeb(ownerKey, trades);
+    await replaceDividendsFromWeb(ownerKey, dividends);
+
+    res.json({
+      ok: true,
+      ownerKeyMasked: `${ownerKey.slice(0, 6)}...${ownerKey.slice(-4)}`,
+      holdings: portfolio.size,
+      trades: trades.length,
+      dividends: dividends.length
+    });
+  } catch (error) {
+    console.error("Web to LINE sync failed:", error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get('/api/web-sync/pull', requireWebSyncToken, async (req, res) => {
+  try {
+    if (!hasPortfolioDb) {
+      return res.status(400).json({
+        ok: false,
+        error: "Supabase 尚未啟用，無法從 LINE 同步。"
+      });
+    }
+
+    const ownerKey = await getWebSyncOwnerKey();
+    const webState = await buildWebStateFromLine(ownerKey);
+    res.json({
+      ok: true,
+      ownerKeyMasked: `${ownerKey.slice(0, 6)}...${ownerKey.slice(-4)}`,
+      state: webState,
+      trades: webState.trades.length,
+      dividends: webState.dividends.length
+    });
+  } catch (error) {
+    console.error("LINE to web sync failed:", error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
 });
 
 app.get('/', (req, res) => {
