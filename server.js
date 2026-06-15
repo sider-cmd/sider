@@ -1943,6 +1943,13 @@ const signedMoney = (value) =>
   `${Number(value) > 0 ? "+" : ""}${formatBriefMoney(value)} 元`;
 const signedPercent = (value) =>
   `${Number(value) > 0 ? "+" : ""}${Number(value).toFixed(2)}%`;
+const toLineSafeText = (text, limit = 4800) => {
+  const value = String(text || "");
+  if (value.length <= limit) {
+    return value;
+  }
+  return `${value.slice(0, limit)}\n\n（內容較長，已先截斷。可再輸入「盤中分析」重新查詢。）`;
+};
 
 const fetchInstitutionalChipSummary = async (code) => {
   try {
@@ -2075,7 +2082,7 @@ const buildIntradayDecisionAnalysis = async (ownerKey, stockNameLookup = {}) => 
   [...rows].sort((a, b) => b.profitPercent - a.profitPercent).slice(0, 1).forEach(pushUnique);
 
   const analyses = await Promise.all(
-    selected.slice(0, 6).map(async (item) => {
+    selected.slice(0, 4).map(async (item) => {
       const [chip, margin] = await Promise.all([
         fetchInstitutionalChipSummary(item.code),
         fetchMarginChipSummary(item.code)
@@ -2114,7 +2121,7 @@ ${margin.text}
     .join("\n");
 
   const now = getTaipeiNow();
-  return `盤中持股分析
+  return toLineSafeText(`盤中持股分析
 ${now.dateKey} ${now.timeKey}
 
 整體
@@ -2136,7 +2143,7 @@ ${topGainers}
 大戶動向
 目前尚未接入穩定的大戶/集保級距資料源；本版先用外資、投信、自營商與融資融券作為籌碼判斷。
 
-提醒：這是風險健檢，不是買賣建議。賣出前仍要看你的資金需求、停損停利規則與是否有新交易尚未同步。`;
+提醒：這是風險健檢，不是買賣建議。賣出前仍要看你的資金需求、停損停利規則與是否有新交易尚未同步。`);
 };
 
 const checkAndPushIntradayDecisionAnalysis = async (force = false) => {
@@ -2160,7 +2167,7 @@ const checkAndPushIntradayDecisionAnalysis = async (force = false) => {
       continue;
     }
 
-    const text = await buildIntradayDecisionAnalysis(ownerKey);
+    const text = toLineSafeText(await buildIntradayDecisionAnalysis(ownerKey));
     await client.pushMessage(ownerKey, {
       type: "text",
       text
@@ -2279,7 +2286,7 @@ async function handleEvent(event) {
       const text = await buildIntradayDecisionAnalysis(ownerKey, stockNames);
       return client.replyMessage(event.replyToken, {
         type: "text",
-        text
+        text: toLineSafeText(text)
       });
     } catch (error) {
       console.error("intraday decision analysis failed:", error);
@@ -6558,7 +6565,11 @@ app.get('/intraday/analysis/check', async (req, res) => {
     });
   } catch (error) {
     console.error("Manual intraday decision analysis check failed:", error);
-    res.status(500).json({ ok: false, error: error.message });
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+      detail: error.response?.data || null
+    });
   }
 });
 
@@ -6651,15 +6662,4 @@ app.listen(PORT, '0.0.0.0', () => {
     }
     console.log(
       `Daily portfolio report scheduler enabled. Default times: ${DAILY_REPORT_TIMES.join(
-        ", "
-      ) || "none"}`
-    );
-    setInterval(() => {
-      checkAndPushDailyReports().catch((error) => {
-        console.error("Daily portfolio report schedule failed:", error);
-      });
-    }, DAILY_REPORT_INTERVAL_MS);
-  } else {
-    console.log("Auto price alerts disabled: database is not enabled");
-  }
-});
+ 
