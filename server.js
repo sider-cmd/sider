@@ -2451,7 +2451,7 @@ async function handleEvent(event) {
 🗑️ 移除提醒：提醒-台積電
 
 🗓️ 今日總結：今日總結
-📡 盤中快訊：盤中快訊
+📡 盤中分析：盤中分析 / 盤中快訊
 🚨 盤中異常：盤中異常 / 異常快訊
 ⚙️ 異常門檻：異常設定 3 3000 8000
 📌 持股日報：持股日報
@@ -4975,12 +4975,12 @@ if (userMessage.trim() === "已實現損益") {
 }
 
 if (userMessage.trim() === "盤中快訊" || userMessage.trim() === "持股快訊") {
-  const text = await buildIntradayPortfolioBrief(watchlistKey, stockNames);
+  const text = await buildIntradayDecisionAnalysis(watchlistKey, stockNames);
   return client.replyMessage(event.replyToken, {
     type: "text",
     text:
       text ||
-      "目前沒有持股資料，無法產生盤中快訊。請先輸入「匯入持股」或「持股+台積電 35 2000」。"
+      "目前沒有持股資料，無法產生盤中分析。請先輸入「匯入持股」或「持股+台積電 35 2000」。"
   });
 }
 
@@ -6587,10 +6587,10 @@ app.get('/alerts/check', async (req, res) => {
 
 app.get('/intraday/check', async (req, res) => {
   try {
-    await checkAndPushIntradayBriefs(true);
-    res.json({ ok: true });
+    const results = await checkAndPushIntradayDecisionAnalysis(true);
+    res.json({ ok: true, pushed: results.length, mode: "unified-analysis" });
   } catch (error) {
-    console.error("手動觸發盤中持股快訊失敗:", error);
+    console.error("手動觸發整合盤中分析失敗:", error);
     res.status(500).json({ ok: false, error: error.message });
   }
 });
@@ -6667,20 +6667,7 @@ app.listen(PORT, '0.0.0.0', () => {
         console.error("Tiered cost alerts auto check failed:", error);
       });
     }, ALERT_CHECK_INTERVAL_MS);
-    if (INTRADAY_PUSH_ENABLED && INTRADAY_PUSH_TIMES.length > 0) {
-      console.log(
-        `Intraday portfolio briefs enabled. Times: ${INTRADAY_PUSH_TIMES.join(
-          ", "
-        )}`
-      );
-      setInterval(() => {
-        checkAndPushIntradayBriefs().catch((error) => {
-          console.error("盤中持股快訊排程失敗:", error);
-        });
-      }, INTRADAY_PUSH_INTERVAL_MS);
-    } else {
-      console.log("Intraday portfolio briefs disabled");
-    }
+    console.log("Intraday portfolio briefs merged into decision analysis; standalone brief scheduler disabled");
     if (INTRADAY_ANALYSIS_ENABLED && INTRADAY_ANALYSIS_TIMES.length > 0) {
       console.log(
         `Intraday decision analysis enabled. Times: ${INTRADAY_ANALYSIS_TIMES.join(
