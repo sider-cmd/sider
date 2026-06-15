@@ -34,6 +34,7 @@ const tieredCostAlerts = new Map();
 const portfolioBackups = new Map();
 const portfolioValueSnapshots = new Map();
 const quoteCache = new Map();
+let tdccShareholdingCache = { fetchedAt: 0, rowsByCode: new Map(), sourceDate: null };
 const intradayBriefPushLog = new Set();
 const intradayAnalysisPushLog = new Set();
 const intradayAnomalyBaselines = new Map();
@@ -1951,6 +1952,173 @@ const toLineSafeText = (text, limit = 4800) => {
   return `${value.slice(0, limit)}\n\n（內容較長，已先截斷。可再輸入「盤中分析」重新查詢。）`;
 };
 
+const TDCC_SHAREHOLDING_URL = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5";
+const TDCC_SHAREHOLDING_CACHE_MS = 6 * 60 * 60 * 1000;
+const SHAREHOLDING_BIG_TIERS = new Set([12, 13, 14, 15]);
+const SHAREHOLDING_RETAIL_TIERS = new Set([1, 2, 3, 4, 5, 6, 7, 8]);
+
+const parseTdccNumber = (value) =>
+  Number(String(value || "0").replace(/,/g, "").trim()) || 0;
+
+const formatTdccDate = (value) => {
+  const text = String(value || "").trim();
+  if (text.length !== 8) return text || "未知日期";
+  return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
+};
+
+const parseTdccShareholdingCsv = (csvText) => {
+  const rowsByCode = new Map();
+  const lines = String(csvText || "").replace(/^\uFEFF/, "").trim().split(/\r?\n/);
+  for (const line of lines.slice(1)) {
+    const [date, code, tier, holders, shares, percent] = line.split(",");
+    const stockCode = String(code || "").trim();
+    const level = Number(String(tier || "").trim());
+    if (!stockCode || !Number.isFinite(level)) continue;
+    if (!rowsByCode.has(stockCode)) rowsByCode.set(stockCode, []);
+    rowsByCode.get(stockCode).push({
+      date: String(date || "").trim(),
+      code: stockCode,
+      tier: level,
+      holders: parseTdccNumber(holders),
+      shares: parseTdccNumber(shares),
+      percent: Number(String(percent || "0").trim()) || 0
+    });
+  }
+  return rowsByCode;
+};
+
+const getTdccShareholdingRowsByCode = async () => {
+  if (
+    tdccShareholdingCache.rowsByCode.size > 0 &&
+    Date.now() - tdccShareholdingCache.fetchedAt < TDCC_SHAREHOLDING_CACHE_MS
+  ) {
+    return tdccShareholdingCache;
+  }
+
+  const response = await axios.get(TDCC_SHAREHOLDING_URL, {
+    responseType: "text",
+    timeout: 15000,
+    transformResponse: [(data) => data]
+  });
+  const rowsByCode = parseTdccShareholdingCsv(response.data);
+  const firstRows = [...rowsByCode.values()][0] || [];
+  tdccShareholdingCache = {
+    fetchedAt: Date.now(),
+    rowsByCode,
+    sourceDate: firstRows[0]?.date || null
+  };
+  return tdccShareholdingCache;
+};
+
+const summarizeShareholdingRows = (rows) => {
+  if (!rows || rows.length === 0) return null;
+  const totalRow = rows.find((row) => row.tier === 17);
+  const sumPercent = (tiers) =>
+    rows
+      .filter((row) => tiers.has(row.tier))
+      .reduce((sum, row) => sum + Number(row.percent || 0), 0);
+  const sumHolders = (tiers) =>
+    rows
+      .filter((row) => tiers.has(row.tier))
+      .reduce((sum, row) => sum + Number(row.holders || 0), 0);
+  const bigPercent = sumPercent(SHAREHOLDING_BIG_TIERS);
+  const retailPercent = sumPercent(SHAREHOLDING_RETAIL_TIERS);
+  const megaRow = rows.find((row) => row.tier === 15);
+  const totalHolders = totalRow?.holders || rows.reduce((sum, row) => sum + row.holders, 0);
+  let level = "中性";
+  const reasons = [];
+  if (bigPercent >= 70 && retailPercent <= 15) {
+    level = "集中";
+    reasons.push("大戶占比高、散戶占比低");
+  } else if (bigPercent >= 55) {
+    level = "偏集中";
+    reasons.push("400 張以上持股占比較高");
+  } else if (retailPercent >= 35 && bigPercent < 45) {
+    level = "偏分散";
+    reasons.push("50 張以下散戶占比偏高");
+  } else {
+    reasons.push("大戶與散戶占比未見極端");
+  }
+  if ((megaRow?.percent || 0) >= 45) reasons.push("千張以上占比高");
+  return {
+    date: rows[0]?.date || totalRow?.date,
+    bigPercent,
+    retailPercent,
+    megaPercent: megaRow?.percent || 0,
+    bigHolders: sumHolders(SHAREHOLDING_BIG_TIERS),
+    retailHolders: sumHolders(SHAREHOLDING_RETAIL_TIERS),
+    totalHolders,
+    level,
+    reasons
+  };
+};
+
+const formatShareholdingPercent = (value) => `${Number(value || 0).toFixed(2)}%`;
+
+const buildMajorHolderWeeklyReport = async (ownerKey) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return "大戶週報\n\n目前沒有持股資料。請先同步網頁資產表到 LINE。";
+  }
+
+  const tdcc = await getTdccShareholdingRowsByCode();
+  const analyses = entries
+    .map(([code]) => {
+      const summary = summarizeShareholdingRows(tdcc.rowsByCode.get(code));
+      return {
+        code,
+        name: dailyName(code),
+        summary
+      };
+    })
+    .filter((item) => item.summary);
+
+  if (analyses.length === 0) {
+    return `大戶週報
+
+目前 ${entries.length} 檔持股都查不到集保級距資料。
+資料來源：TDCC 集保戶股權分散表
+更新頻率：每 7 日`;
+  }
+
+  const concentrated = [...analyses]
+    .sort((a, b) => b.summary.bigPercent - a.summary.bigPercent)
+    .slice(0, 5);
+  const dispersed = [...analyses]
+    .sort((a, b) => b.summary.retailPercent - a.summary.retailPercent)
+    .slice(0, 5);
+  const rows = [...analyses]
+    .sort((a, b) => b.summary.bigPercent - a.summary.bigPercent)
+    .slice(0, 10)
+    .map((item, index) => `${index + 1}. ${stockLabel(item.code, item.name)}
+等級：${item.summary.level}
+大戶(400張+)：${formatShareholdingPercent(item.summary.bigPercent)}，千張以上：${formatShareholdingPercent(item.summary.megaPercent)}
+散戶(50張以下)：${formatShareholdingPercent(item.summary.retailPercent)}，股東數：${formatBriefMoney(item.summary.totalHolders)} 人
+判斷：${item.summary.reasons.join("、")}`)
+    .join("\n\n");
+
+  const simpleRank = (items, pick) =>
+    items
+      .map((item, index) => `${index + 1}. ${stockLabel(item.code, item.name)} ${pick(item)}`)
+      .join("\n");
+
+  return toLineSafeText(`大戶週報
+資料日期：${formatTdccDate(analyses[0].summary.date || tdcc.sourceDate)}
+資料來源：TDCC 集保戶股權分散表，每 7 日更新
+
+重點持股
+${rows}
+
+大戶集中前五
+${simpleRank(concentrated, (item) => formatShareholdingPercent(item.summary.bigPercent))}
+
+散戶占比前五
+${simpleRank(dispersed, (item) => formatShareholdingPercent(item.summary.retailPercent))}
+
+提醒：這是週資料，適合看籌碼結構，不是盤中即時買賣訊號。`);
+};
+
 const fetchInstitutionalChipSummary = async (code) => {
   try {
     const response = await axios.get(
@@ -2192,8 +2360,8 @@ ${topLosers}
 貢獻前三
 ${topGainers}
 
-大戶動向
-目前尚未接入穩定的大戶/集保級距資料源；本版先用外資、投信、自營商與融資融券作為籌碼判斷。
+籌碼動向
+本版已納入外資、投信、自營商與融資融券；真正的大戶/集保級距屬於週資料，尚未接入，因此不拿來做盤中即時判斷。
 
 提醒：這是風險健檢，不是買賣建議。賣出前仍要看你的資金需求、停損停利規則與是否有新交易尚未同步。`);
 };
@@ -2452,6 +2620,7 @@ async function handleEvent(event) {
 
 🗓️ 今日總結：今日總結
 📡 盤中分析：盤中分析 / 盤中快訊
+🏦 大戶週報：大戶動向 / 集保級距
 🚨 盤中異常：盤中異常 / 異常快訊
 ⚙️ 異常門檻：異常設定 3 3000 8000
 📌 持股日報：持股日報
@@ -2892,6 +3061,22 @@ if (marketInput === "每日報告推送") {
     return client.replyMessage(event.replyToken, {
       type: "text",
       text: "每日報告推送失敗，請到 Railway Deploy Logs 查看 manual daily report push failed 後面的錯誤。"
+    });
+  }
+}
+
+if (["大戶動向", "集保級距", "大戶週報", "集保週報"].includes(marketInput)) {
+  try {
+    const report = await buildMajorHolderWeeklyReport(watchlistKey);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: report
+    });
+  } catch (error) {
+    console.error("major holder weekly report failed:", error);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "大戶週報產生失敗，請稍後再試，或到 Railway Deploy Logs 查看 major holder weekly report failed 後面的錯誤。"
     });
   }
 }
@@ -6592,6 +6777,29 @@ app.get('/intraday/check', async (req, res) => {
   } catch (error) {
     console.error("手動觸發整合盤中分析失敗:", error);
     res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get('/major-holders/check', async (req, res) => {
+  try {
+    const ownerKeys = await getPortfolioOwnerKeys();
+    let pushed = 0;
+    for (const ownerKey of ownerKeys) {
+      const text = await buildMajorHolderWeeklyReport(ownerKey);
+      await client.pushMessage(ownerKey, {
+        type: "text",
+        text
+      });
+      pushed += 1;
+    }
+    res.json({ ok: true, pushed, mode: "major-holder-weekly" });
+  } catch (error) {
+    console.error("Manual major holder weekly report failed:", error);
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+      detail: error.response?.data || null
+    });
   }
 });
 
