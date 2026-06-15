@@ -2051,6 +2051,61 @@ const analysisLevelForHolding = (item, chip, margin, weightPercent) => {
   return { level: "觀察", reasons: reasons.length ? reasons : ["未出現明顯籌碼或成本警訊"] };
 };
 
+const getIntradayAnalysisSnapshots = async (entries) =>
+  Promise.all(
+    entries.map(async ([code, position]) => {
+      try {
+        const quote = await fetchAlertYahooQuote(code, 2500);
+        const price = Number(quote.regularMarketPrice);
+        if (!Number.isFinite(price)) {
+          throw new Error("報價無效");
+        }
+        const shares = Number(position.shares || 0);
+        const averageCost = Number(position.averageCost || 0);
+        const costValue = shares * averageCost;
+        const marketValue = shares * price;
+        const profit = marketValue - costValue;
+        const profitPercent = costValue > 0 ? (profit / costValue) * 100 : 0;
+        return {
+          code,
+          name: dailyName(code),
+          shares,
+          averageCost,
+          price,
+          costValue,
+          marketValue,
+          profit,
+          profitPercent,
+          error: false
+        };
+      } catch (error) {
+        return {
+          code,
+          name: dailyName(code),
+          shares: Number(position.shares || 0),
+          error: true,
+          errorMessage: error.message
+        };
+      }
+    })
+  );
+
+const intradayAnalysisTotals = (snapshots) => {
+  const successful = snapshots.filter((item) => !item.error);
+  const totalCost = successful.reduce((sum, item) => sum + item.costValue, 0);
+  const totalMarket = successful.reduce((sum, item) => sum + item.marketValue, 0);
+  const totalProfit = totalMarket - totalCost;
+  const totalPercent = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
+  return {
+    successful,
+    failedCount: snapshots.length - successful.length,
+    totalCost,
+    totalMarket,
+    totalProfit,
+    totalPercent
+  };
+};
+
 const buildIntradayDecisionAnalysis = async (ownerKey, stockNameLookup = {}) => {
   const portfolio = await getPortfolio(ownerKey);
   const entries = [...portfolio.entries()];
@@ -2058,11 +2113,8 @@ const buildIntradayDecisionAnalysis = async (ownerKey, stockNameLookup = {}) => 
     return "盤中分析\n\n目前沒有持股資料。請先同步網頁資產表到 LINE。";
   }
 
-  const snapshots = await getPortfolioSnapshots(entries, {
-    timeoutMs: 2500,
-    raceMs: 3500
-  });
-  const totals = portfolioTotals(snapshots);
+  const snapshots = await getIntradayAnalysisSnapshots(entries);
+  const totals = intradayAnalysisTotals(snapshots);
   if (totals.successful.length === 0) {
     return `盤中分析\n\n目前 ${entries.length} 檔持股報價都查詢失敗，暫時無法分析。`;
   }
@@ -6662,7 +6714,7 @@ app.listen(PORT, '0.0.0.0', () => {
     }
     console.log(
       `Daily portfolio report scheduler enabled. Default times: ${DAILY_REPORT_TIMES.join(
- ", "
+        ", "
       ) || "none"}`
     );
     setInterval(() => {
