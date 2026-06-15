@@ -6662,4 +6662,15 @@ app.listen(PORT, '0.0.0.0', () => {
     }
     console.log(
       `Daily portfolio report scheduler enabled. Default times: ${DAILY_REPORT_TIMES.join(
- 
+ ", "
+      ) || "none"}`
+    );
+    setInterval(() => {
+      checkAndPushDailyReports().catch((error) => {
+        console.error("Daily portfolio report schedule failed:", error);
+      });
+    }, DAILY_REPORT_INTERVAL_MS);
+  } else {
+    console.log("Auto price alerts disabled: database is not enabled");
+  }
+});
