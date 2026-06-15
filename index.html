@@ -672,6 +672,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   let lastSyncTime = 0;
   let isSyncing = false;
   let saveDebounceTimer = null;
+  let allowSnapshotOverwriteOnce = false;
 
   function normalizeExcludedSymbols(raw) {
     const normalized = { ...DEFAULT_EXCLUDED_SYMBOLS };
@@ -702,6 +703,40 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     return s;
   }
 
+  function normalizeSnapshot(snapshot) {
+    const date = String(snapshot?.date || '').trim();
+    if (!date) return null;
+    return {
+      date,
+      mv: Number(snapshot.mv || 0),
+      cost: Number(snapshot.cost || 0),
+      realized: Number(snapshot.realized || 0),
+      dividend: Number(snapshot.dividend || 0)
+    };
+  }
+
+  function mergeSnapshots(localSnapshots = [], cloudSnapshots = []) {
+    const byDate = new Map();
+    [...cloudSnapshots, ...localSnapshots].forEach(snapshot => {
+      const normalized = normalizeSnapshot(snapshot);
+      if (!normalized) return;
+      const existing = byDate.get(normalized.date);
+      const hasUsefulNumbers = normalized.mv > 0 || normalized.cost > 0 || normalized.realized !== 0 || normalized.dividend !== 0;
+      if (!existing || hasUsefulNumbers) byDate.set(normalized.date, normalized);
+    });
+    return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  function mergeExcludedSymbols(localExcluded = {}, cloudExcluded = {}) {
+    return normalizeExcludedSymbols({ ...cloudExcluded, ...localExcluded });
+  }
+
+  function mergeCloudSnapshotsIntoLocal(cloudData) {
+    const before = JSON.stringify(state.snapshots || []);
+    state.snapshots = mergeSnapshots(state.snapshots || [], cloudData?.snapshots || []);
+    return JSON.stringify(state.snapshots || []) !== before;
+  }
+
   function loadLocal() {
     try {
       const raw = localStorage.getItem(KEY);
@@ -722,7 +757,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   async function pullFromCloud(silent) {
     if (isSyncing) return;
     isSyncing = true;
-    setSyncStatus('syncing', '下載中');
+    setSyncStatus('syncing', '???');
     try {
       const r = await fetch(JSONBIN_BASE + '/latest', {
         headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
@@ -731,30 +766,42 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       const cloudData = await r.json();
       const cloudTime = cloudData._updatedAt || 0;
       const localTime = state._updatedAt || 0;
+      const mergedSnapshots = mergeSnapshots(state.snapshots || [], cloudData.snapshots || []);
       if (cloudTime > localTime) {
         state = normalizeStateShape({
           trades: cloudData.trades || [],
           dividends: cloudData.dividends || [],
           prices: cloudData.prices || {},
           priceUpdated: cloudData.priceUpdated || {},
-          snapshots: cloudData.snapshots || [],
+          snapshots: mergedSnapshots,
           cfg: {...DEFAULT_CFG, ...(cloudData.cfg || {})},
           customNames: cloudData.customNames || {},
-          excludedSymbols: cloudData.excludedSymbols || {},
+          excludedSymbols: mergeExcludedSymbols(state.excludedSymbols || {}, cloudData.excludedSymbols || {}),
           _updatedAt: cloudTime
         });
         saveLocal();
         renderAll();
-        if (!silent) showToast('已從雲端下載最新資料', 'down');
-        else if (cloudTime > 0) showToast('☁️ 偵測到雲端更新，已自動同步');
-      } else if (!silent) {
-        showToast('本機已是最新版本');
+        if (!silent) showToast('??????????', 'down');
+        else if (cloudTime > 0) showToast('???????');
+      } else {
+        const snapshotsChanged = JSON.stringify(state.snapshots || []) !== JSON.stringify(mergedSnapshots);
+        const excludedBefore = JSON.stringify(state.excludedSymbols || {});
+        state.snapshots = mergedSnapshots;
+        state.excludedSymbols = mergeExcludedSymbols(state.excludedSymbols || {}, cloudData.excludedSymbols || {});
+        const excludedChanged = JSON.stringify(state.excludedSymbols || {}) !== excludedBefore;
+        if (snapshotsChanged || excludedChanged) {
+          saveLocal();
+          renderAll();
+          if (!silent) showToast('?????????', 'down');
+        } else if (!silent) {
+          showToast('??????');
+        }
       }
       lastSyncTime = Date.now();
-      setSyncStatus('synced', '已同步');
+      setSyncStatus('synced', '???');
     } catch(e) {
-      setSyncStatus('sync-error', '同步失敗');
-      if (!silent) showToast('雲端下載失敗：' + e.message, 'up');
+      setSyncStatus('sync-error', '????');
+      if (!silent) showToast('???????' + e.message, 'up');
     }
     isSyncing = false;
   }
@@ -765,10 +812,21 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       return;
     }
     isSyncing = true;
-    setSyncStatus('syncing', '上傳中');
-    state._updatedAt = Date.now();
-    saveLocal();
+    setSyncStatus('syncing', '???');
     try {
+      if (!allowSnapshotOverwriteOnce) {
+        const latest = await fetch(JSONBIN_BASE + '/latest', {
+          headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
+        });
+        if (latest.ok) {
+          const cloudData = await latest.json();
+          state.snapshots = mergeSnapshots(state.snapshots || [], cloudData.snapshots || []);
+          state.excludedSymbols = mergeExcludedSymbols(state.excludedSymbols || {}, cloudData.excludedSymbols || {});
+        }
+      }
+      allowSnapshotOverwriteOnce = false;
+      state._updatedAt = Date.now();
+      saveLocal();
       const r = await fetch(JSONBIN_BASE, {
         method: 'PUT',
         headers: {
@@ -779,11 +837,11 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       });
       if (!r.ok) throw new Error('HTTP ' + r.status);
       lastSyncTime = Date.now();
-      setSyncStatus('synced', '已同步');
-      if (!silent) showToast('☁️ 已上傳至雲端', 'down');
+      setSyncStatus('synced', '???');
+      if (!silent) showToast('??????', 'down');
     } catch(e) {
-      setSyncStatus('sync-error', '同步失敗');
-      if (!silent) showToast('上傳失敗：' + e.message, 'up');
+      setSyncStatus('sync-error', '????');
+      if (!silent) showToast('?????' + e.message, 'up');
     }
     isSyncing = false;
   }
@@ -1440,6 +1498,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     });
     $('clear-snapshots-btn').addEventListener('click', () => {
       if (!confirm('確定清除所有歷史快照？走勢圖將需重新累積。')) return;
+      allowSnapshotOverwriteOnce = true;
       state.snapshots = [];
       save(); renderTrend();
       showToast('已清除所有快照');
@@ -2105,7 +2164,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   });
   $('clear-btn').addEventListener('click', () => {
     if (!confirm('確定清除所有資料（包含雲端）？此操作無法復原。')) return;
-    state = { trades: [], dividends: [], prices: {}, priceUpdated: {}, snapshots: [], cfg: {...DEFAULT_CFG}, customNames: {}, _updatedAt: Date.now() };
+    allowSnapshotOverwriteOnce = true;
+    state = { trades: [], dividends: [], prices: {}, priceUpdated: {}, snapshots: [], cfg: {...DEFAULT_CFG}, customNames: {}, excludedSymbols: {}, _updatedAt: Date.now() };
     save(); loadCfg(); renderAll();
     showToast('已清除');
   });
