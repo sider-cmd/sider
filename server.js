@@ -35,6 +35,7 @@ const portfolioBackups = new Map();
 const portfolioValueSnapshots = new Map();
 const quoteCache = new Map();
 const intradayBriefPushLog = new Set();
+const intradayAnalysisPushLog = new Set();
 const intradayAnomalyBaselines = new Map();
 const intradayAnomalyPushLog = new Map();
 const intradayAnomalySettings = new Map();
@@ -124,6 +125,12 @@ const INTRADAY_PUSH_TIMES = (process.env.INTRADAY_PUSH_TIMES || "10:00,12:30,13:
   .map((time) => time.trim())
   .filter(Boolean);
 const INTRADAY_PUSH_ENABLED = process.env.INTRADAY_PUSH_ENABLED !== "false";
+const INTRADAY_ANALYSIS_TIMES = (process.env.INTRADAY_ANALYSIS_TIMES || "10:00,12:50")
+  .split(",")
+  .map((time) => time.trim())
+  .filter(Boolean);
+const INTRADAY_ANALYSIS_ENABLED =
+  process.env.INTRADAY_ANALYSIS_ENABLED !== "false";
 const INTRADAY_ANOMALY_ENABLED =
   process.env.INTRADAY_ANOMALY_ENABLED !== "false";
 const INTRADAY_ANOMALY_INTERVAL_MS =
@@ -1917,6 +1924,253 @@ const checkAndPushIntradayBriefs = async (force = false) => {
   }
 };
 
+const intradayAnalysisStartDate = (days = 14) => {
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const pick = (type) => parts.find((part) => part.type === type)?.value;
+  return `${pick("year")}-${pick("month")}-${pick("day")}`;
+};
+
+const signedLots = (value) =>
+  `${Number(value) > 0 ? "+" : ""}${Number(value).toFixed(0)} 張`;
+const signedMoney = (value) =>
+  `${Number(value) > 0 ? "+" : ""}${formatBriefMoney(value)} 元`;
+const signedPercent = (value) =>
+  `${Number(value) > 0 ? "+" : ""}${Number(value).toFixed(2)}%`;
+
+const fetchInstitutionalChipSummary = async (code) => {
+  try {
+    const response = await axios.get(
+      `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id=${code}&start_date=${intradayAnalysisStartDate(14)}`,
+      { headers: { Authorization: `Bearer ${FINMIND_TOKEN}` }, timeout: 5000 }
+    );
+    const rows = response.data?.data || [];
+    if (rows.length === 0) {
+      return { available: false, text: "法人：查無資料" };
+    }
+    const latestDate = rows[rows.length - 1].date;
+    const latestRows = rows.filter((item) => item.date === latestDate);
+    const netLots = (...names) =>
+      latestRows
+        .filter((item) => names.includes(item.name))
+        .reduce((sum, item) => sum + Number(item.buy || 0) - Number(item.sell || 0), 0) / 1000;
+    const foreign = netLots("Foreign_Investor");
+    const trust = netLots("Investment_Trust");
+    const dealer = netLots("Dealer_self", "Dealer_Hedging");
+    const total = foreign + trust + dealer;
+    return {
+      available: true,
+      latestDate,
+      foreign,
+      trust,
+      dealer,
+      total,
+      text: `法人(${latestDate})：外資 ${signedLots(foreign)}，投信 ${signedLots(trust)}，自營 ${signedLots(dealer)}，合計 ${signedLots(total)}`
+    };
+  } catch (error) {
+    return { available: false, text: `法人：查詢失敗(${error.message})` };
+  }
+};
+
+const fetchMarginChipSummary = async (code) => {
+  try {
+    const response = await axios.get(
+      `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMarginPurchaseShortSale&data_id=${code}&start_date=${intradayAnalysisStartDate(14)}`,
+      { headers: { Authorization: `Bearer ${FINMIND_TOKEN}` }, timeout: 5000 }
+    );
+    const rows = response.data?.data || [];
+    if (rows.length === 0) {
+      return { available: false, text: "融資融券：查無資料" };
+    }
+    const latest = rows[rows.length - 1];
+    const marginChange =
+      Number(latest.MarginPurchaseTodayBalance || 0) -
+      Number(latest.MarginPurchaseYesterdayBalance || 0);
+    const shortChange =
+      Number(latest.ShortSaleTodayBalance || 0) -
+      Number(latest.ShortSaleYesterdayBalance || 0);
+    return {
+      available: true,
+      latestDate: latest.date,
+      marginChange,
+      shortChange,
+      marginBalance: Number(latest.MarginPurchaseTodayBalance || 0),
+      shortBalance: Number(latest.ShortSaleTodayBalance || 0),
+      text: `融資融券(${latest.date})：融資 ${latest.MarginPurchaseTodayBalance} 張(${signedLots(marginChange)})，融券 ${latest.ShortSaleTodayBalance} 張(${signedLots(shortChange)})`
+    };
+  } catch (error) {
+    return { available: false, text: `融資融券：查詢失敗(${error.message})` };
+  }
+};
+
+const analysisLevelForHolding = (item, chip, margin, weightPercent) => {
+  const reasons = [];
+  let score = 0;
+  if (item.profitPercent <= -10) {
+    score += 4;
+    reasons.push("跌破成本 10% 以上");
+  } else if (item.profitPercent <= -5) {
+    score += 2;
+    reasons.push("跌破成本 5% 以上");
+  }
+  if (weightPercent >= 20) {
+    score += 2;
+    reasons.push("部位占比偏高");
+  }
+  if (chip?.available && chip.total < 0) {
+    score += 1;
+    reasons.push("三大法人賣超");
+  }
+  if (chip?.available && chip.foreign < 0) {
+    score += 1;
+    reasons.push("外資賣超");
+  }
+  if (margin?.available && margin.marginChange > 0 && item.profitPercent < 0) {
+    score += 1;
+    reasons.push("虧損中且融資增加");
+  }
+  if (item.profitPercent >= 20) {
+    reasons.push("獲利已高，可檢視分批停利策略");
+  }
+  if (score >= 5) return { level: "高風險", reasons };
+  if (score >= 3) return { level: "注意", reasons };
+  if (item.profitPercent >= 20) return { level: "可檢視停利", reasons };
+  return { level: "觀察", reasons: reasons.length ? reasons : ["未出現明顯籌碼或成本警訊"] };
+};
+
+const buildIntradayDecisionAnalysis = async (ownerKey, stockNameLookup = {}) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const entries = [...portfolio.entries()];
+  if (entries.length === 0) {
+    return "盤中分析\n\n目前沒有持股資料。請先同步網頁資產表到 LINE。";
+  }
+
+  const snapshots = await getPortfolioSnapshots(entries, {
+    timeoutMs: 2500,
+    raceMs: 3500
+  });
+  const totals = portfolioTotals(snapshots);
+  if (totals.successful.length === 0) {
+    return `盤中分析\n\n目前 ${entries.length} 檔持股報價都查詢失敗，暫時無法分析。`;
+  }
+
+  const rows = totals.successful.map((item) => ({
+    ...item,
+    weightPercent: totals.totalMarket > 0 ? (item.marketValue / totals.totalMarket) * 100 : 0
+  }));
+  const selected = [];
+  const pushUnique = (item) => {
+    if (item && !selected.some((saved) => saved.code === item.code)) {
+      selected.push(item);
+    }
+  };
+  [...rows].sort((a, b) => a.profitPercent - b.profitPercent).slice(0, 3).forEach(pushUnique);
+  [...rows].sort((a, b) => b.marketValue - a.marketValue).slice(0, 2).forEach(pushUnique);
+  [...rows].sort((a, b) => b.profitPercent - a.profitPercent).slice(0, 1).forEach(pushUnique);
+
+  const analyses = await Promise.all(
+    selected.slice(0, 6).map(async (item) => {
+      const [chip, margin] = await Promise.all([
+        fetchInstitutionalChipSummary(item.code),
+        fetchMarginChipSummary(item.code)
+      ]);
+      const level = analysisLevelForHolding(item, chip, margin, item.weightPercent);
+      return { item, chip, margin, level };
+    })
+  );
+
+  const warningRows = analyses
+    .sort((a, b) => {
+      const order = { "高風險": 0, "注意": 1, "可檢視停利": 2, "觀察": 3 };
+      return order[a.level.level] - order[b.level.level] || a.item.profitPercent - b.item.profitPercent;
+    })
+    .map(({ item, chip, margin, level }, index) => {
+      const name = stockLabel(item.code, item.name || stockNameLookup[item.code]);
+      return `${index + 1}. ${name}
+等級：${level.level}
+持股損益：${signedMoney(item.profit)} (${signedPercent(item.profitPercent)})，占比 ${item.weightPercent.toFixed(1)}%
+${chip.text}
+${margin.text}
+判斷：${level.reasons.join("、")}`;
+    })
+    .join("\n\n");
+
+  const topLosers = [...rows]
+    .sort((a, b) => a.profit - b.profit)
+    .slice(0, 3)
+    .map((item, index) => `${index + 1}. ${stockLabel(item.code, item.name)} ${signedMoney(item.profit)} (${signedPercent(item.profitPercent)})`)
+    .join("\n");
+
+  const topGainers = [...rows]
+    .sort((a, b) => b.profit - a.profit)
+    .slice(0, 3)
+    .map((item, index) => `${index + 1}. ${stockLabel(item.code, item.name)} ${signedMoney(item.profit)} (${signedPercent(item.profitPercent)})`)
+    .join("\n");
+
+  const now = getTaipeiNow();
+  return `盤中持股分析
+${now.dateKey} ${now.timeKey}
+
+整體
+持股檔數：${entries.length} 檔
+總市值：${formatBriefMoney(totals.totalMarket)} 元
+總成本：${formatBriefMoney(totals.totalCost)} 元
+未實現損益：${signedMoney(totals.totalProfit)} (${signedPercent(totals.totalPercent)})
+報價失敗：${totals.failedCount} 檔
+
+需要優先看的持股
+${warningRows}
+
+拖累前三
+${topLosers}
+
+貢獻前三
+${topGainers}
+
+大戶動向
+目前尚未接入穩定的大戶/集保級距資料源；本版先用外資、投信、自營商與融資融券作為籌碼判斷。
+
+提醒：這是風險健檢，不是買賣建議。賣出前仍要看你的資金需求、停損停利規則與是否有新交易尚未同步。`;
+};
+
+const checkAndPushIntradayDecisionAnalysis = async (force = false) => {
+  if (!hasPortfolioDb || !INTRADAY_ANALYSIS_ENABLED || INTRADAY_ANALYSIS_TIMES.length === 0) {
+    return [];
+  }
+
+  const now = getTaipeiNow();
+  if (!force && (now.weekday === "Sat" || now.weekday === "Sun")) {
+    return [];
+  }
+  if (!force && !INTRADAY_ANALYSIS_TIMES.includes(now.timeKey)) {
+    return [];
+  }
+
+  const ownerKeys = await getPortfolioOwnerKeys();
+  const results = [];
+  for (const ownerKey of ownerKeys) {
+    const pushKey = `${now.dateKey}|${now.timeKey}|${ownerKey}`;
+    if (!force && intradayAnalysisPushLog.has(pushKey)) {
+      continue;
+    }
+
+    const text = await buildIntradayDecisionAnalysis(ownerKey);
+    await client.pushMessage(ownerKey, {
+      type: "text",
+      text
+    });
+    intradayAnalysisPushLog.add(pushKey);
+    results.push({ ownerKey, pushed: true });
+  }
+  return results;
+};
+
 app.get('/audio', async (req, res) => {
   try {
     const text = String(req.query.text || '').slice(0, 500);
@@ -2015,6 +2269,23 @@ async function handleEvent(event) {
         text:
           textFromCodes(9888, 65039, 32, 25104, 26412, 30064, 24120, 25688, 35201, 26597, 35426, 22833, 25943, 65292, 20294, 31243, 24335, 26377, 25910, 21040, 25351, 20196) +
           "\n" + textFromCodes(35531, 21040, 32, 82, 97, 105, 108, 119, 97, 121, 32, 68, 101, 112, 108, 111, 121, 32, 76, 111, 103, 115, 32, 26597, 30475, 32, 99, 111, 115, 116, 32, 97, 108, 101, 114, 116, 32, 115, 117, 109, 109, 97, 114, 121, 32, 102, 97, 105, 108, 101, 100, 32, 24460, 38754, 30340, 37679, 35492)
+      });
+    }
+  }
+
+  if (["盤中分析", "持股分析", "盤中持股分析", "今日持股分析"].includes(marketInput)) {
+    try {
+      const ownerKey = event.source?.userId || "default";
+      const text = await buildIntradayDecisionAnalysis(ownerKey, stockNames);
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text
+      });
+    } catch (error) {
+      console.error("intraday decision analysis failed:", error);
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "盤中分析產生失敗，請稍後再試，或到 Railway Deploy Logs 查看 intraday decision analysis failed 後面的錯誤。"
       });
     }
   }
@@ -6278,6 +6549,19 @@ app.get('/daily-report/check', async (req, res) => {
   }
 });
 
+app.get('/intraday/analysis/check', async (req, res) => {
+  try {
+    const results = await checkAndPushIntradayDecisionAnalysis(true);
+    res.json({
+      ok: true,
+      pushed: results.length
+    });
+  } catch (error) {
+    console.error("Manual intraday decision analysis check failed:", error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 app.get('/intraday/anomaly/check', async (req, res) => {
   try {
     if (typeof checkAndPushIntradayAnomalies !== "function") {
@@ -6333,6 +6617,20 @@ app.listen(PORT, '0.0.0.0', () => {
       }, INTRADAY_PUSH_INTERVAL_MS);
     } else {
       console.log("Intraday portfolio briefs disabled");
+    }
+    if (INTRADAY_ANALYSIS_ENABLED && INTRADAY_ANALYSIS_TIMES.length > 0) {
+      console.log(
+        `Intraday decision analysis enabled. Times: ${INTRADAY_ANALYSIS_TIMES.join(
+          ", "
+        )}`
+      );
+      setInterval(() => {
+        checkAndPushIntradayDecisionAnalysis().catch((error) => {
+          console.error("Intraday decision analysis schedule failed:", error);
+        });
+      }, INTRADAY_PUSH_INTERVAL_MS);
+    } else {
+      console.log("Intraday decision analysis disabled");
     }
     if (
       INTRADAY_ANOMALY_ENABLED &&
