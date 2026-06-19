@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-05 STOCK-NAMES-1";
+const BOT_BUILD_VERSION = "2026-06-19 DIVIDEND-DETAILS-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -6540,30 +6540,62 @@ const replaceTradesFromWeb = async (ownerKey, trades) => {
   }
 };
 
+const WEB_DIVIDEND_NOTE_PREFIX = "WEB_DIVIDEND:";
+
+const normalizeWebDividendDetail = (dividend = {}) => {
+  const code = normalizeWebCode(dividend.symbol || dividend.code);
+  const shares = Number(dividend.shares || 0);
+  const cash = Number(dividend.cash || 0);
+  const stock = Number(dividend.stock || 0);
+  const fee = Number(dividend.fee || 0);
+  const nhi = Number(dividend.nhi || 0);
+  const grossCash = shares * cash;
+  const amount = grossCash - fee - nhi;
+
+  return {
+    date: String(dividend.date || new Date().toISOString().slice(0, 10)).slice(0, 10),
+    symbol: code,
+    name: dividend.name || dailyName(code),
+    year: dividend.year || new Date().getFullYear(),
+    shares,
+    cash,
+    stock,
+    fee,
+    nhi,
+    grossCash: Number(grossCash.toFixed(2)),
+    amount: Number(amount.toFixed(2))
+  };
+};
+
 const normalizeWebDividends = (dividends = []) =>
   dividends
-    .filter((dividend) => dividend && dividend.symbol)
+    .filter((dividend) => dividend && (dividend.symbol || dividend.code))
     .map((dividend) => {
-      const code = normalizeWebCode(dividend.symbol);
-      const cashTotal =
-        Number(dividend.shares || 0) * Number(dividend.cash || 0);
-      const amount =
-        cashTotal - Number(dividend.fee || 0) - Number(dividend.nhi || 0);
+      const detail = normalizeWebDividendDetail(dividend);
+      const noteText = [
+        detail.year ? `${detail.year} 年度` : "",
+        detail.name || dailyName(detail.symbol),
+        `${detail.shares} 股`,
+        detail.cash ? `每股現金 ${detail.cash}` : "",
+        detail.stock ? `股票股利 ${detail.stock} 股/10股` : "",
+        detail.fee ? `手續費 ${detail.fee}` : "",
+        detail.nhi ? `補充費 ${detail.nhi}` : ""
+      ]
+        .filter(Boolean)
+        .join(" ");
+
       return {
-        code,
-        amount: Number(amount.toFixed(0)),
-        note: [
-          dividend.year ? `${dividend.year} 年度` : "",
-          dividend.name || dailyName(code),
-          Number(dividend.stock || 0) > 0
-            ? `股票股利 ${dividend.stock} 股/10股`
-            : ""
-        ]
-          .filter(Boolean)
-          .join(" ")
+        code: detail.symbol,
+        amount: Number(detail.amount.toFixed(0)),
+        receivedAt: parseWebTradeDate(detail.date),
+        note: `${WEB_DIVIDEND_NOTE_PREFIX}${JSON.stringify(detail)} ${noteText}`
       };
     })
-    .filter((dividend) => /^\d{4,6}$/.test(dividend.code) && dividend.amount !== 0);
+    .filter(
+      (dividend) =>
+        /^\d{4,6}[A-Z]?$/.test(dividend.code) &&
+        (dividend.amount !== 0 || dividend.note.includes('"stock":'))
+    );
 
 const replaceDividendsFromWeb = async (ownerKey, dividends) => {
   if (!hasPortfolioDb) {
@@ -6586,7 +6618,8 @@ const replaceDividendsFromWeb = async (ownerKey, dividends) => {
     owner_key: ownerKey,
     code: dividend.code,
     amount: dividend.amount,
-    note: dividend.note || ""
+    note: dividend.note || "",
+    received_at: dividend.receivedAt || new Date().toISOString()
   }));
 
   if (rows.length > 0) {
@@ -6644,20 +6677,47 @@ const buildWebStateFromLine = async (ownerKey) => {
           tax: 0
         }));
 
-  const webDividends = dividends.map((dividend) => ({
-    id: `line_dividend_${dividend.id || `${dividend.code}_${dividend.received_at}`}`,
-    date: String(dividend.received_at || new Date().toISOString()).slice(0, 10),
-    symbol: dividend.code,
-    name: dailyName(dividend.code),
-    year:
-      String(dividend.note || "").match(/\d{4}/)?.[0] ||
-      new Date(dividend.received_at || Date.now()).getFullYear(),
-    shares: 1,
-    cash: Number(dividend.amount || 0),
-    stock: 0,
-    fee: 0,
-    nhi: 0
-  }));
+  const webDividends = dividends.map((dividend) => {
+    const note = String(dividend.note || "");
+    const encodedDetail = note.startsWith(WEB_DIVIDEND_NOTE_PREFIX)
+      ? note.slice(WEB_DIVIDEND_NOTE_PREFIX.length).match(/^\{.*?\}(?=\s|$)/)?.[0]
+      : null;
+
+    if (encodedDetail) {
+      try {
+        const detail = JSON.parse(encodedDetail);
+        return {
+          id: `line_dividend_${dividend.id || `${dividend.code}_${dividend.received_at}`}`,
+          date: String(detail.date || dividend.received_at || new Date().toISOString()).slice(0, 10),
+          symbol: detail.symbol || dividend.code,
+          name: detail.name || dailyName(detail.symbol || dividend.code),
+          year: detail.year || new Date(dividend.received_at || Date.now()).getFullYear(),
+          shares: Number(detail.shares || 0),
+          cash: Number(detail.cash || 0),
+          stock: Number(detail.stock || 0),
+          fee: Number(detail.fee || 0),
+          nhi: Number(detail.nhi || 0)
+        };
+      } catch {
+        // Fall through to legacy conversion below.
+      }
+    }
+
+    return {
+      id: `line_dividend_${dividend.id || `${dividend.code}_${dividend.received_at}`}`,
+      date: String(dividend.received_at || new Date().toISOString()).slice(0, 10),
+      symbol: dividend.code,
+      name: dailyName(dividend.code),
+      year:
+        note.match(/\d{4}/)?.[0] ||
+        new Date(dividend.received_at || Date.now()).getFullYear(),
+      shares: 1,
+      cash: Number(dividend.amount || 0),
+      stock: 0,
+      fee: 0,
+      nhi: 0
+    };
+  });
 
   return {
     trades: webTrades,
