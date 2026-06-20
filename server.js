@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-20 LINE-FULL-SYNC-3";
+const BOT_BUILD_VERSION = "2026-06-20 LINE-FULL-SYNC-4";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -6617,7 +6617,10 @@ const normalizeWebDividends = (dividends = []) => {
 
       return {
         code: detail.symbol,
-        amount: Number(detail.amount.toFixed(0)),
+        // Supabase requires amount > 0. Stock-only dividends keep their real
+        // zero-cash detail in the encoded note and use a tiny storage sentinel.
+        amount:
+          detail.amount > 0 ? Number(detail.amount.toFixed(0)) : 0.01,
         receivedAt: receivedAtDate.toISOString(),
         note: `${WEB_DIVIDEND_NOTE_PREFIX}${JSON.stringify(detail)} ${noteText}`
       };
