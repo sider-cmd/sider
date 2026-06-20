@@ -46,6 +46,18 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
 const hasPortfolioDb = Boolean(SUPABASE_URL && SUPABASE_KEY);
+const JSONBIN_API_KEY = process.env.JSONBIN_API_KEY;
+const JSONBIN_BIN_ID = process.env.JSONBIN_BIN_ID;
+const hasCloudState = Boolean(JSONBIN_API_KEY && JSONBIN_BIN_ID);
+
+const jsonBinUrl = (suffix = "") =>
+  `https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}${suffix}`;
+
+const jsonBinHeaders = (extra = {}) => ({
+  "X-Master-Key": JSONBIN_API_KEY,
+  "X-Bin-Meta": "false",
+  ...extra
+});
 
 const supabaseHeaders = () => ({
   apikey: SUPABASE_KEY,
@@ -6737,8 +6749,41 @@ app.get('/health', (req, res) => {
   res.json({
     ok: true,
     version: BOT_BUILD_VERSION,
-    portfolioDb: hasPortfolioDb
+    portfolioDb: hasPortfolioDb,
+    cloudState: hasCloudState
   });
+});
+
+app.get('/api/cloud-state', requireWebSyncToken, async (req, res) => {
+  if (!hasCloudState) {
+    return res.status(503).json({ ok: false, error: "Railway 尚未設定 JSONBin 雲端同步。" });
+  }
+  try {
+    const response = await axios.get(jsonBinUrl('/latest'), {
+      headers: jsonBinHeaders(),
+      timeout: 12000
+    });
+    return res.json(response.data?.record || response.data);
+  } catch (error) {
+    const status = error.response?.status || 502;
+    return res.status(status).json({ ok: false, error: `讀取雲端資料失敗：${error.message}` });
+  }
+});
+
+app.put('/api/cloud-state', requireWebSyncToken, async (req, res) => {
+  if (!hasCloudState) {
+    return res.status(503).json({ ok: false, error: "Railway 尚未設定 JSONBin 雲端同步。" });
+  }
+  try {
+    await axios.put(jsonBinUrl(), req.body || {}, {
+      headers: jsonBinHeaders({ "Content-Type": "application/json" }),
+      timeout: 12000
+    });
+    return res.json({ ok: true, updatedAt: req.body?._updatedAt || Date.now() });
+  } catch (error) {
+    const status = error.response?.status || 502;
+    return res.status(status).json({ ok: false, error: `寫入雲端資料失敗：${error.message}` });
+  }
 });
 
 app.get('/api/web-sync/status', requireWebSyncToken, async (req, res) => {
