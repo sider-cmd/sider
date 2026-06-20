@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-19 DIVIDEND-DETAILS-1";
+const BOT_BUILD_VERSION = "2026-06-20 SECURE-CLOUD-SYNC-2";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -24,7 +24,7 @@ const getOpenAIClient = () => {
   }
   return openaiClient;
 };
-const FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiU2lkZXIiLCJlbWFpbCI6ImxmY2x1MDQxNEBnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.K_yeruf5xx8yChBUdcpOTSVAak3zNgi81a0zmqYk96A";
+const FINMIND_TOKEN = process.env.FINMIND_TOKEN;
 const watchlists = new Map();
 const portfolios = new Map();
 const portfolioTrades = new Map();
@@ -6750,7 +6750,8 @@ app.get('/health', (req, res) => {
     ok: true,
     version: BOT_BUILD_VERSION,
     portfolioDb: hasPortfolioDb,
-    cloudState: hasCloudState
+    cloudState: hasCloudState,
+    finMind: Boolean(FINMIND_TOKEN)
   });
 });
 
