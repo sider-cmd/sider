@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-20 SECURE-CLOUD-SYNC-2";
+const BOT_BUILD_VERSION = "2026-06-20 LINE-FULL-SYNC-3";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -65,6 +65,17 @@ const supabaseHeaders = () => ({
   "Content-Type": "application/json",
   Prefer: "return=minimal"
 });
+
+const serviceErrorMessage = (error) => {
+  const detail = error?.response?.data;
+  if (typeof detail === "string" && detail.trim()) return detail.trim();
+  if (detail && typeof detail === "object") {
+    return [detail.message, detail.details, detail.hint, detail.code]
+      .filter(Boolean)
+      .join("｜");
+  }
+  return error?.message || "未知錯誤";
+};
 
 const portfolioApiUrl = () =>
   `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/portfolio_positions`;
@@ -6452,7 +6463,7 @@ const normalizeWebTrades = (trades = []) =>
     }))
     .filter(
       (trade) =>
-        /^\d{4,6}$/.test(trade.code) &&
+        /^\d{4,6}[A-Z]?$/.test(trade.code) &&
         trade.shares > 0 &&
         trade.price > 0
     );
@@ -6579,8 +6590,9 @@ const normalizeWebDividendDetail = (dividend = {}) => {
   };
 };
 
-const normalizeWebDividends = (dividends = []) =>
-  dividends
+const normalizeWebDividends = (dividends = []) => {
+  const receivedAtCounts = new Map();
+  return dividends
     .filter((dividend) => dividend && (dividend.symbol || dividend.code))
     .map((dividend) => {
       const detail = normalizeWebDividendDetail(dividend);
@@ -6596,10 +6608,17 @@ const normalizeWebDividends = (dividends = []) =>
         .filter(Boolean)
         .join(" ");
 
+      const receivedAtBase = parseWebTradeDate(detail.date);
+      const receivedAtKey = `${detail.symbol}|${String(receivedAtBase).slice(0, 10)}`;
+      const receivedAtOffset = receivedAtCounts.get(receivedAtKey) || 0;
+      receivedAtCounts.set(receivedAtKey, receivedAtOffset + 1);
+      const receivedAtDate = new Date(receivedAtBase);
+      receivedAtDate.setSeconds(receivedAtDate.getSeconds() + receivedAtOffset);
+
       return {
         code: detail.symbol,
         amount: Number(detail.amount.toFixed(0)),
-        receivedAt: parseWebTradeDate(detail.date),
+        receivedAt: receivedAtDate.toISOString(),
         note: `${WEB_DIVIDEND_NOTE_PREFIX}${JSON.stringify(detail)} ${noteText}`
       };
     })
@@ -6608,6 +6627,7 @@ const normalizeWebDividends = (dividends = []) =>
         /^\d{4,6}[A-Z]?$/.test(dividend.code) &&
         (dividend.amount !== 0 || dividend.note.includes('"stock":'))
     );
+};
 
 const replaceDividendsFromWeb = async (ownerKey, dividends) => {
   if (!hasPortfolioDb) {
@@ -6833,7 +6853,10 @@ app.post('/api/web-sync/push', requireWebSyncToken, async (req, res) => {
     });
   } catch (error) {
     console.error("Web to LINE sync failed:", error);
-    res.status(500).json({ ok: false, error: error.message });
+    res.status(500).json({
+      ok: false,
+      error: `同步到 LINE 資料庫失敗：${serviceErrorMessage(error)}`
+    });
   }
 });
 
@@ -6857,7 +6880,10 @@ app.get('/api/web-sync/pull', requireWebSyncToken, async (req, res) => {
     });
   } catch (error) {
     console.error("LINE to web sync failed:", error);
-    res.status(500).json({ ok: false, error: error.message });
+    res.status(500).json({
+      ok: false,
+      error: `從 LINE 資料庫讀取失敗：${serviceErrorMessage(error)}`
+    });
   }
 });
 
@@ -6997,33 +7023,4 @@ app.listen(PORT, '0.0.0.0', () => {
       console.log("Intraday decision analysis disabled");
     }
     if (
-      INTRADAY_ANOMALY_ENABLED &&
-      typeof checkAndPushIntradayAnomalies === "function"
-    ) {
-      console.log(
-        `Intraday anomaly alerts enabled. Interval: ${Math.round(
-          INTRADAY_ANOMALY_INTERVAL_MS / 1000
-        )} seconds`
-      );
-      setInterval(() => {
-        checkAndPushIntradayAnomalies().catch((error) => {
-          console.error("盤中異常提醒排程失敗:", error);
-        });
-      }, INTRADAY_ANOMALY_INTERVAL_MS);
-    } else {
-      console.log("Intraday anomaly alerts disabled");
-    }
-    console.log(
-      `Daily portfolio report scheduler enabled. Default times: ${DAILY_REPORT_TIMES.join(
-        ", "
-      ) || "none"}`
-    );
-    setInterval(() => {
-      checkAndPushDailyReports().catch((error) => {
-        console.error("Daily portfolio report schedule failed:", error);
-      });
-    }, DAILY_REPORT_INTERVAL_MS);
-  } else {
-    console.log("Auto price alerts disabled: database is not enabled");
-  }
-});
+      INTRADAY_ANOMALY_E
