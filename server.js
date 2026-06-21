@@ -7042,4 +7042,103 @@ app.get('/intraday/analysis/check', async (req, res) => {
     const results = await checkAndPushIntradayDecisionAnalysis(true);
     res.json({
       ok: true,
-      pushed: re
+      pushed: results.length
+    });
+  } catch (error) {
+    console.error("Manual intraday decision analysis check failed:", error);
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+      detail: error.response?.data || null
+    });
+  }
+});
+
+app.get('/intraday/anomaly/check', async (req, res) => {
+  try {
+    if (typeof checkAndPushIntradayAnomalies !== "function") {
+      return res.status(503).json({
+        ok: false,
+        error: "Intraday anomaly alerts are not available in this build"
+      });
+    }
+    const results = await checkAndPushIntradayAnomalies(true);
+    res.json({
+      ok: true,
+      checked: results.length,
+      pushed: results.filter((result) => result.shouldPush).length
+    });
+  } catch (error) {
+    console.error("手動觸發盤中異常提醒失敗:", error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// =================【4. 啟動伺服器】=================
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on port ${PORT}`);
+  if (hasPortfolioDb) {
+    console.log(
+      `Auto price alerts enabled. Interval: ${Math.round(
+        ALERT_CHECK_INTERVAL_MS / 1000
+      )} seconds`
+    );
+    setInterval(() => {
+      checkAndPushPriceAlerts().catch((error) => {
+        console.error("自動價格提醒排程失敗:", error);
+      });
+      checkAndPushTieredCostAlerts().catch((error) => {
+        console.error("Tiered cost alerts auto check failed:", error);
+      });
+    }, ALERT_CHECK_INTERVAL_MS);
+    console.log("Intraday portfolio briefs merged into decision analysis; standalone brief scheduler disabled");
+    if (INTRADAY_ANALYSIS_ENABLED && INTRADAY_ANALYSIS_TIMES.length > 0) {
+      console.log(
+        `Intraday decision analysis enabled. Times: ${INTRADAY_ANALYSIS_TIMES.join(
+          ", "
+        )}`
+      );
+      setInterval(() => {
+        checkAndPushIntradayDecisionAnalysis().catch((error) => {
+          console.error("Intraday decision analysis schedule failed:", error);
+        });
+      }, INTRADAY_PUSH_INTERVAL_MS);
+    } else {
+      console.log("Intraday decision analysis disabled");
+    }
+    if (
+      INTRADAY_ANOMALY_ENABLED &&
+      typeof checkAndPushIntradayAnomalies === "function"
+    ) {
+      console.log(
+        `Intraday anomaly alerts enabled. Interval: ${Math.round(
+          INTRADAY_ANOMALY_INTERVAL_MS / 1000
+        )} seconds`
+      );
+      setInterval(() => {
+        checkAndPushIntradayAnomalies().catch((error) => {
+          console.error("盤中異常提醒排程失敗:", error);
+        });
+      }, INTRADAY_ANOMALY_INTERVAL_MS);
+    } else {
+      console.log("Intraday anomaly alerts disabled");
+    }
+    console.log(
+      `Daily portfolio report scheduler enabled. Default times: ${DAILY_REPORT_TIMES.join(
+        ", "
+      ) || "none"}`
+    );
+    setInterval(() => {
+      checkAndPushDailyReports().catch((error) => {
+        console.error("Daily portfolio report schedule failed:", error);
+      });
+    }, DAILY_REPORT_INTERVAL_MS);
+  } else {
+    console.log("Auto price alerts disabled: database is not enabled");
+  }
+});
