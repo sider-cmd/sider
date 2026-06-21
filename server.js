@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-20 LINE-FULL-SYNC-4";
+const BOT_BUILD_VERSION = "2026-06-21 CLOUD-SYNC-FALLBACK-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -6778,10 +6778,61 @@ app.get('/health', (req, res) => {
   });
 });
 
+const webCloudBackupKey = (ownerKey) => `web-state:${ownerKey}`;
+
+const getSupabaseWebCloudState = async (ownerKey) => {
+  if (!hasPortfolioDb) return null;
+  const response = await axios.get(backupApiUrl(), {
+    headers: supabaseHeaders(),
+    params: {
+      owner_key: `eq.${webCloudBackupKey(ownerKey)}`,
+      select: "portfolio,updated_at",
+      limit: 1
+    },
+    timeout: 8000
+  });
+  const row = response.data?.[0];
+  if (!row?.portfolio || Array.isArray(row.portfolio)) return null;
+  return row.portfolio;
+};
+
+const saveSupabaseWebCloudState = async (ownerKey, state) => {
+  if (!hasPortfolioDb) return false;
+  await axios.post(
+    `${backupApiUrl()}?on_conflict=owner_key`,
+    {
+      owner_key: webCloudBackupKey(ownerKey),
+      portfolio: state,
+      updated_at: new Date().toISOString()
+    },
+    {
+      headers: {
+        ...supabaseHeaders(),
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      },
+      timeout: 8000
+    }
+  );
+  return true;
+};
+
 app.get('/api/cloud-state', requireWebSyncToken, async (req, res) => {
-  if (!hasCloudState) {
-    return res.status(503).json({ ok: false, error: "Railway 尚未設定 JSONBin 雲端同步。" });
+  let supabaseError;
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const state = await getSupabaseWebCloudState(ownerKey);
+    if (state) return res.json(state);
+  } catch (error) {
+    supabaseError = error;
   }
+
+  if (!hasCloudState) {
+    return res.status(503).json({
+      ok: false,
+      error: `雲端備份尚未可用：${serviceErrorMessage(supabaseError)}`
+    });
+  }
+
   try {
     const response = await axios.get(jsonBinUrl('/latest'), {
       headers: jsonBinHeaders(),
@@ -6795,18 +6846,53 @@ app.get('/api/cloud-state', requireWebSyncToken, async (req, res) => {
 });
 
 app.put('/api/cloud-state', requireWebSyncToken, async (req, res) => {
-  if (!hasCloudState) {
-    return res.status(503).json({ ok: false, error: "Railway 尚未設定 JSONBin 雲端同步。" });
-  }
+  const state = req.body || {};
+  let supabaseError;
   try {
-    await axios.put(jsonBinUrl(), req.body || {}, {
+    const ownerKey = await getWebSyncOwnerKey();
+    await saveSupabaseWebCloudState(ownerKey, state);
+
+    if (hasCloudState) {
+      axios.put(jsonBinUrl(), state, {
+        headers: jsonBinHeaders({ "Content-Type": "application/json" }),
+        timeout: 8000
+      }).catch((error) => {
+        console.warn(`JSONBin secondary backup failed: ${serviceErrorMessage(error)}`);
+      });
+    }
+
+    return res.json({
+      ok: true,
+      source: "supabase",
+      updatedAt: state._updatedAt || Date.now()
+    });
+  } catch (error) {
+    supabaseError = error;
+  }
+
+  if (!hasCloudState) {
+    return res.status(503).json({
+      ok: false,
+      error: `寫入雲端資料失敗：${serviceErrorMessage(supabaseError)}`
+    });
+  }
+
+  try {
+    await axios.put(jsonBinUrl(), state, {
       headers: jsonBinHeaders({ "Content-Type": "application/json" }),
       timeout: 12000
     });
-    return res.json({ ok: true, updatedAt: req.body?._updatedAt || Date.now() });
+    return res.json({
+      ok: true,
+      source: "jsonbin",
+      updatedAt: state._updatedAt || Date.now()
+    });
   } catch (error) {
     const status = error.response?.status || 502;
-    return res.status(status).json({ ok: false, error: `寫入雲端資料失敗：${error.message}` });
+    return res.status(status).json({
+      ok: false,
+      error: `寫入雲端資料失敗：Supabase ${serviceErrorMessage(supabaseError)}；JSONBin ${serviceErrorMessage(error)}`
+    });
   }
 });
 
@@ -6956,103 +7042,4 @@ app.get('/intraday/analysis/check', async (req, res) => {
     const results = await checkAndPushIntradayDecisionAnalysis(true);
     res.json({
       ok: true,
-      pushed: results.length
-    });
-  } catch (error) {
-    console.error("Manual intraday decision analysis check failed:", error);
-    res.status(500).json({
-      ok: false,
-      error: error.message,
-      detail: error.response?.data || null
-    });
-  }
-});
-
-app.get('/intraday/anomaly/check', async (req, res) => {
-  try {
-    if (typeof checkAndPushIntradayAnomalies !== "function") {
-      return res.status(503).json({
-        ok: false,
-        error: "Intraday anomaly alerts are not available in this build"
-      });
-    }
-    const results = await checkAndPushIntradayAnomalies(true);
-    res.json({
-      ok: true,
-      checked: results.length,
-      pushed: results.filter((result) => result.shouldPush).length
-    });
-  } catch (error) {
-    console.error("手動觸發盤中異常提醒失敗:", error);
-    res.status(500).json({ ok: false, error: error.message });
-  }
-});
-
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
-});
-
-// =================【4. 啟動伺服器】=================
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
-  if (hasPortfolioDb) {
-    console.log(
-      `Auto price alerts enabled. Interval: ${Math.round(
-        ALERT_CHECK_INTERVAL_MS / 1000
-      )} seconds`
-    );
-    setInterval(() => {
-      checkAndPushPriceAlerts().catch((error) => {
-        console.error("自動價格提醒排程失敗:", error);
-      });
-      checkAndPushTieredCostAlerts().catch((error) => {
-        console.error("Tiered cost alerts auto check failed:", error);
-      });
-    }, ALERT_CHECK_INTERVAL_MS);
-    console.log("Intraday portfolio briefs merged into decision analysis; standalone brief scheduler disabled");
-    if (INTRADAY_ANALYSIS_ENABLED && INTRADAY_ANALYSIS_TIMES.length > 0) {
-      console.log(
-        `Intraday decision analysis enabled. Times: ${INTRADAY_ANALYSIS_TIMES.join(
-          ", "
-        )}`
-      );
-      setInterval(() => {
-        checkAndPushIntradayDecisionAnalysis().catch((error) => {
-          console.error("Intraday decision analysis schedule failed:", error);
-        });
-      }, INTRADAY_PUSH_INTERVAL_MS);
-    } else {
-      console.log("Intraday decision analysis disabled");
-    }
-    if (
-      INTRADAY_ANOMALY_ENABLED &&
-      typeof checkAndPushIntradayAnomalies === "function"
-    ) {
-      console.log(
-        `Intraday anomaly alerts enabled. Interval: ${Math.round(
-          INTRADAY_ANOMALY_INTERVAL_MS / 1000
-        )} seconds`
-      );
-      setInterval(() => {
-        checkAndPushIntradayAnomalies().catch((error) => {
-          console.error("盤中異常提醒排程失敗:", error);
-        });
-      }, INTRADAY_ANOMALY_INTERVAL_MS);
-    } else {
-      console.log("Intraday anomaly alerts disabled");
-    }
-    console.log(
-      `Daily portfolio report scheduler enabled. Default times: ${DAILY_REPORT_TIMES.join(
-        ", "
-      ) || "none"}`
-    );
-    setInterval(() => {
-      checkAndPushDailyReports().catch((error) => {
-        console.error("Daily portfolio report schedule failed:", error);
-      });
-    }, DAILY_REPORT_INTERVAL_MS);
-  } else {
-    console.log("Auto price alerts disabled: database is not enabled");
-  }
-});
+      pushed: re
