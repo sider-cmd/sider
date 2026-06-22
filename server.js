@@ -939,7 +939,7 @@ const roundPrice = (value) => Math.round(Number(value) * 100) / 100;
 
 const calculateCostBandRows = async (ownerKey, percent = 30) => {
   const portfolio = await getPortfolio(ownerKey);
-  const entries = [...portfolio.entries()];
+  const entries = analysisEntries([...portfolio.entries()]);
   const ratio = Number(percent) / 100;
   return entries
     .map(([code, position]) => {
@@ -1025,6 +1025,19 @@ const dailyName = (code, fallback) =>
   dailyReportStockNames[code] || fallback || code;
 
 const stockLabel = (code, fallback) => `${dailyName(code, fallback)}（${code}）`;
+
+const ANALYSIS_EXCLUDED_SYMBOLS = new Set(
+  String(process.env.ANALYSIS_EXCLUDED_SYMBOLS || "3552")
+    .split(",")
+    .map((code) => code.trim())
+    .filter(Boolean)
+);
+const isAnalysisExcludedSymbol = (code) =>
+  ANALYSIS_EXCLUDED_SYMBOLS.has(String(code || "").trim());
+const analysisEntries = (entries) =>
+  entries.filter(([code]) => !isAnalysisExcludedSymbol(code));
+const analysisItems = (items) =>
+  items.filter((item) => !isAnalysisExcludedSymbol(item?.code));
 
 const dailyMoney = (value) => Number(value || 0).toFixed(0);
 const dailyPercent = (value) => Number(value || 0).toFixed(2);
@@ -1242,13 +1255,14 @@ ${now.dateKey} ${now.timeKey}
 目前即時報價查詢失敗，請稍後再試。`;
   }
 
-  const strongest = [...totals.successful].sort(
+  const rankedHoldings = analysisItems(totals.successful);
+  const strongest = [...rankedHoldings].sort(
     (a, b) => b.profitPercent - a.profitPercent
   );
-  const weakest = [...totals.successful].sort(
+  const weakest = [...rankedHoldings].sort(
     (a, b) => a.profitPercent - b.profitPercent
   );
-  const topWeights = [...totals.successful].sort(
+  const topWeights = [...rankedHoldings].sort(
     (a, b) => b.marketValue - a.marketValue
   );
 
@@ -1300,10 +1314,11 @@ ${now.dateKey} ${now.timeKey}
 目前即時報價查詢失敗，請稍後再試。`;
   }
 
-  const strongest = [...totals.successful]
+  const rankedHoldings = analysisItems(totals.successful);
+  const strongest = [...rankedHoldings]
     .sort((a, b) => b.profitPercent - a.profitPercent)
     .slice(0, 3);
-  const weakest = [...totals.successful]
+  const weakest = [...rankedHoldings]
     .sort((a, b) => a.profitPercent - b.profitPercent)
     .slice(0, 3);
   const totalReturn = totals.totalProfit + dividendTotal;
@@ -1654,7 +1669,7 @@ ${rows}${hidden}`;
 const buildTieredCostAlertSummary = async (ownerKey) => {
   const fmt = (value) => Number(value || 0).toFixed(0);
   const portfolio = await getPortfolio(ownerKey);
-  const entries = [...portfolio.entries()].filter(([, position]) => {
+  const entries = analysisEntries([...portfolio.entries()]).filter(([, position]) => {
     const shares = Number(position.shares || 0);
     const averageCost = Number(position.averageCost || 0);
     return shares > 0 && averageCost > 0;
@@ -1872,13 +1887,14 @@ const buildIntradayPortfolioBrief = async (ownerKey, stockNameLookup = {}) => {
   const totalMarket = successful.reduce((sum, item) => sum + item.marketValue, 0);
   const totalProfit = totalMarket - totalCost;
   const totalPercent = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
-  const topGainers = [...successful]
+  const rankedHoldings = analysisItems(successful);
+  const topGainers = [...rankedHoldings]
     .sort((a, b) => b.profitPercent - a.profitPercent)
     .slice(0, 3);
-  const topLosers = [...successful]
+  const topLosers = [...rankedHoldings]
     .sort((a, b) => a.profitPercent - b.profitPercent)
     .slice(0, 3);
-  const topWeights = [...successful]
+  const topWeights = [...rankedHoldings]
     .sort((a, b) => b.marketValue - a.marketValue)
     .slice(0, 3);
   const now = getTaipeiNow();
@@ -2081,7 +2097,7 @@ const formatShareholdingPercent = (value) => `${Number(value || 0).toFixed(2)}%`
 
 const buildMajorHolderWeeklyReport = async (ownerKey) => {
   const portfolio = await getPortfolio(ownerKey);
-  const entries = [...portfolio.entries()];
+  const entries = analysisEntries([...portfolio.entries()]);
   if (entries.length === 0) {
     return "大戶週報\n\n目前沒有持股資料。請先同步網頁資產表到 LINE。";
   }
@@ -2311,7 +2327,7 @@ const buildIntradayDecisionAnalysis = async (ownerKey, stockNameLookup = {}) => 
     return `盤中分析\n\n目前 ${entries.length} 檔持股報價都查詢失敗，暫時無法分析。`;
   }
 
-  const rows = totals.successful.map((item) => ({
+  const rows = analysisItems(totals.successful).map((item) => ({
     ...item,
     weightPercent: totals.totalMarket > 0 ? (item.marketValue / totals.totalMarket) * 100 : 0
   }));
@@ -3447,7 +3463,7 @@ const portfolioTotals = (snapshots) => {
 
 const buildIntradayAnomalyState = async (ownerKey) => {
   const portfolio = await getPortfolio(ownerKey);
-  const entries = [...portfolio.entries()];
+  const entries = analysisEntries([...portfolio.entries()]);
   if (entries.length === 0) {
     return null;
   }
@@ -3797,7 +3813,8 @@ const buildPortfolioPeriodReport = async (ownerKey, period) => {
   const percentPointChange = last.totalPercent - first.totalPercent;
   const marketChangePercent =
     first.totalMarket > 0 ? (marketChange / first.totalMarket) * 100 : 0;
-  const strongest = [...(last.positions || [])]
+  const evaluatedPositions = analysisItems(last.positions || []);
+  const strongest = [...evaluatedPositions]
     .sort((a, b) => Number(b.profit || 0) - Number(a.profit || 0))
     .slice(0, 3)
     .map(
@@ -3805,7 +3822,7 @@ const buildPortfolioPeriodReport = async (ownerKey, period) => {
         `${index + 1}. ${stockLabel(item.code, item.name || stockNames[item.code])}：${profitSign(item.profit)}${formatMoney(item.profit)} 元`
     )
     .join("\n");
-  const weakest = [...(last.positions || [])]
+  const weakest = [...evaluatedPositions]
     .sort((a, b) => Number(a.profit || 0) - Number(b.profit || 0))
     .slice(0, 3)
     .map(
@@ -5301,10 +5318,11 @@ if (
   const alerts = await getPriceAlerts(watchlistKey);
   const totalReturn = totals.totalProfit + realizedProfit + dividendTotal;
 
-  const strongest = [...totals.successful]
+  const evaluatedHoldings = analysisItems(totals.successful);
+  const strongest = [...evaluatedHoldings]
     .sort((a, b) => b.profitPercent - a.profitPercent)
     .slice(0, 3);
-  const weakest = [...totals.successful]
+  const weakest = [...evaluatedHoldings]
     .sort((a, b) => a.profitPercent - b.profitPercent)
     .slice(0, 3);
 
@@ -5322,7 +5340,7 @@ if (
           .join("\n")
       : "暫無可計算資料";
 
-  const aiInput = totals.successful
+  const aiInput = [...evaluatedHoldings]
     .sort((a, b) => Math.abs(b.profit) - Math.abs(a.profit))
     .slice(0, 8)
     .map(
@@ -5476,7 +5494,8 @@ if (userMessage.trim() === "風險控管" || userMessage.trim() === "持股風�
     });
   }
 
-  const withWeight = totals.successful
+  const evaluatedHoldings = analysisItems(totals.successful);
+  const withWeight = evaluatedHoldings
     .map((item) => ({
       ...item,
       weight: (item.marketValue / totals.totalMarket) * 100
@@ -5495,7 +5514,7 @@ if (userMessage.trim() === "風險控管" || userMessage.trim() === "持股風�
   const watchWeight = withWeight
     .filter((item) => item.weight >= 15 && item.weight < 20)
     .map((item) => `${stockLabel(item.code, item.name)}${formatPercent(item.weight)}%`);
-  const deepLosses = totals.successful
+  const deepLosses = evaluatedHoldings
     .filter((item) => item.profitPercent <= -30)
     .sort((a, b) => a.profitPercent - b.profitPercent)
     .map(
@@ -5504,7 +5523,7 @@ if (userMessage.trim() === "風險控管" || userMessage.trim() === "持股風�
           item.profitPercent
         )}%`
     );
-  const mildLosses = totals.successful
+  const mildLosses = evaluatedHoldings
     .filter((item) => item.profitPercent <= -10 && item.profitPercent > -30)
     .sort((a, b) => a.profitPercent - b.profitPercent)
     .slice(0, 5)
@@ -5702,7 +5721,7 @@ if (rebalanceMatch) {
     });
   }
 
-  const withWeight = totals.successful
+  const withWeight = analysisItems(totals.successful)
     .map((item) => ({
       ...item,
       weight: (item.marketValue / totals.totalMarket) * 100
@@ -5843,7 +5862,8 @@ if (userMessage.trim() === "損益排行" || userMessage.trim() === "持股排�
 
   const snapshots = await getPortfolioSnapshots(entries);
   const totals = portfolioTotals(snapshots);
-  const winners = [...totals.successful]
+  const evaluatedHoldings = analysisItems(totals.successful);
+  const winners = [...evaluatedHoldings]
     .sort((a, b) => b.profit - a.profit)
     .slice(0, 5)
     .map(
@@ -5853,7 +5873,7 @@ if (userMessage.trim() === "損益排行" || userMessage.trim() === "持股排�
         )} 元（${profitSign(item.profitPercent)}${formatPercent(item.profitPercent)}%）`
     )
     .join("\n");
-  const losers = [...totals.successful]
+  const losers = [...evaluatedHoldings]
     .sort((a, b) => a.profit - b.profit)
     .slice(0, 5)
     .map(
@@ -5917,7 +5937,7 @@ if (userMessage.trim() === "健檢持股" || userMessage.trim() === "AI持股健
   const totals = portfolioTotals(snapshots);
   const realizedProfit = await getRealizedProfit(watchlistKey);
   const dividendTotal = await getDividendTotal(watchlistKey);
-  const holdingLines = totals.successful
+  const holdingLines = analysisItems(totals.successful)
     .map(
       (item) =>
         `${stockLabel(item.code, item.name)} 持有${item.shares}股 成本${item.averageCost} 現價${item.price} 市值${formatMoney(
@@ -7111,36 +7131,4 @@ app.listen(PORT, '0.0.0.0', () => {
         });
       }, INTRADAY_PUSH_INTERVAL_MS);
     } else {
-      console.log("Intraday decision analysis disabled");
-    }
-    if (
-      INTRADAY_ANOMALY_ENABLED &&
-      typeof checkAndPushIntradayAnomalies === "function"
-    ) {
-      console.log(
-        `Intraday anomaly alerts enabled. Interval: ${Math.round(
-          INTRADAY_ANOMALY_INTERVAL_MS / 1000
-        )} seconds`
-      );
-      setInterval(() => {
-        checkAndPushIntradayAnomalies().catch((error) => {
-          console.error("盤中異常提醒排程失敗:", error);
-        });
-      }, INTRADAY_ANOMALY_INTERVAL_MS);
-    } else {
-      console.log("Intraday anomaly alerts disabled");
-    }
-    console.log(
-      `Daily portfolio report scheduler enabled. Default times: ${DAILY_REPORT_TIMES.join(
-        ", "
-      ) || "none"}`
-    );
-    setInterval(() => {
-      checkAndPushDailyReports().catch((error) => {
-        console.error("Daily portfolio report schedule failed:", error);
-      });
-    }, DAILY_REPORT_INTERVAL_MS);
-  } else {
-    console.log("Auto price alerts disabled: database is not enabled");
-  }
-});
+      console.log("
