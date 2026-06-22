@@ -7131,4 +7131,36 @@ app.listen(PORT, '0.0.0.0', () => {
         });
       }, INTRADAY_PUSH_INTERVAL_MS);
     } else {
-      console.log("
+      console.log("Intraday decision analysis disabled");
+    }
+    if (
+      INTRADAY_ANOMALY_ENABLED &&
+      typeof checkAndPushIntradayAnomalies === "function"
+    ) {
+      console.log(
+        `Intraday anomaly alerts enabled. Interval: ${Math.round(
+          INTRADAY_ANOMALY_INTERVAL_MS / 1000
+        )} seconds`
+      );
+      setInterval(() => {
+        checkAndPushIntradayAnomalies().catch((error) => {
+          console.error("盤中異常提醒排程失敗:", error);
+        });
+      }, INTRADAY_ANOMALY_INTERVAL_MS);
+    } else {
+      console.log("Intraday anomaly alerts disabled");
+    }
+    console.log(
+      `Daily portfolio report scheduler enabled. Default times: ${DAILY_REPORT_TIMES.join(
+        ", "
+      ) || "none"}`
+    );
+    setInterval(() => {
+      checkAndPushDailyReports().catch((error) => {
+        console.error("Daily portfolio report schedule failed:", error);
+      });
+    }, DAILY_REPORT_INTERVAL_MS);
+  } else {
+    console.log("Auto price alerts disabled: database is not enabled");
+  }
+});
