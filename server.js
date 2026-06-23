@@ -6957,7 +6957,8 @@ const buildSystemDiagnostics = async () => {
       priceAlertsMs: ALERT_CHECK_INTERVAL_MS,
       intradayAnalysisEnabled: INTRADAY_ANALYSIS_ENABLED,
       intradayAnalysisTimes: INTRADAY_ANALYSIS_TIMES,
-      intradayAnomalyEnabled: INTRADAY_ANOMALY_ENABLED,
+      intradayAnomalyEnabled:
+        INTRADAY_ANOMALY_ENABLED && typeof checkAndPushIntradayAnomalies === "function",
       dailyReportEnabled: DAILY_REPORT_ENABLED,
       dailyReportTimes: DAILY_REPORT_TIMES
     },
@@ -6969,8 +6970,13 @@ const buildSystemDiagnostics = async () => {
       dailyReports: typeof checkAndPushDailyReports === "function",
       majorHolderWeekly: typeof buildMajorHolderWeeklyReport === "function"
     },
-    checks: {}
+    checks: {},
+    warnings: []
   };
+
+  if (INTRADAY_ANOMALY_ENABLED && typeof checkAndPushIntradayAnomalies !== "function") {
+    diagnostics.warnings.push("盤中異常提醒函式未包含在目前版本，已自動略過該排程。");
+  }
 
   try {
     const ownerKeys = await getPortfolioOwnerKeys();
@@ -6995,6 +7001,14 @@ const buildSystemDiagnostics = async () => {
       diagnostics.cloudData = countWebState(cloudState || {});
       diagnostics.checks.lineData = okCheck(portfolio.size > 0, diagnostics.lineData);
       diagnostics.checks.cloudData = okCheck(Boolean(cloudState), diagnostics.cloudData);
+      if (cloudState) {
+        if (diagnostics.lineData.trades !== diagnostics.cloudData.trades) {
+          diagnostics.warnings.push("LINE 與雲端交易筆數不同，建議重新同步。");
+        }
+        if (diagnostics.lineData.dividends !== diagnostics.cloudData.dividends) {
+          diagnostics.warnings.push("LINE 與雲端股利筆數不同，建議重新同步。");
+        }
+      }
     }
   } catch (error) {
     diagnostics.ok = false;
@@ -7017,7 +7031,12 @@ const buildSystemDiagnostics = async () => {
     });
   }
 
-  const requiredFunctionOk = Object.values(diagnostics.functions).every(Boolean);
+  const requiredFunctionOk =
+    diagnostics.functions.priceAlerts &&
+    diagnostics.functions.tieredCostAlerts &&
+    diagnostics.functions.intradayDecisionAnalysis &&
+    diagnostics.functions.dailyReports &&
+    diagnostics.functions.majorHolderWeekly;
   const requiredEnvOk = diagnostics.env.line && diagnostics.env.portfolioDb && diagnostics.env.finMind;
   diagnostics.ok = diagnostics.ok && requiredFunctionOk && requiredEnvOk;
   diagnostics.checks.requiredFunctions = okCheck(requiredFunctionOk);
@@ -7030,12 +7049,23 @@ const buildSystemDiagnosticsText = (diagnostics) => {
   const lineData = diagnostics.lineData || {};
   const cloudData = diagnostics.cloudData || {};
   const quote = diagnostics.checks.quote || {};
-  const missingEnv = Object.entries(diagnostics.env || {})
-    .filter(([, value]) => !value)
-    .map(([key]) => key);
+  const requiredEnvKeys = ["line", "portfolioDb", "finMind"];
+  const optionalEnvKeys = ["openai", "cloudState", "webSyncOwnerKey", "publicBaseUrl"];
+  const missingEnv = requiredEnvKeys
+    .filter((key) => !diagnostics.env?.[key]);
+  const missingOptionalEnv = optionalEnvKeys
+    .filter((key) => !diagnostics.env?.[key]);
   const missingFunctions = Object.entries(diagnostics.functions || {})
-    .filter(([, value]) => !value)
+    .filter(([key, value]) => key !== "intradayAnomalies" && !value)
     .map(([key]) => key);
+  const warningLines = [
+    ...(diagnostics.warnings || []),
+    ...missingOptionalEnv.map((key) => `選用環境未設定：${key}`)
+  ];
+  const missingOptionalFunctions = Object.entries(diagnostics.functions || {})
+    .filter(([key, value]) => key === "intradayAnomalies" && !value)
+    .map(([key]) => key);
+  warningLines.push(...missingOptionalFunctions.map((key) => `選用函式未啟用：${key}`));
 
   return toLineSafeText(`🩺 系統健檢
 狀態：${checkMark(diagnostics.ok)} ${diagnostics.ok ? "正常" : "需要檢查"}
@@ -7053,7 +7083,8 @@ LINE：持股 ${lineData.holdings ?? 0}｜交易 ${lineData.trades ?? 0}｜股�
 盤中異常：${diagnostics.schedules.intradayAnomalyEnabled ? "啟用" : "停用"}
 
 環境缺少：${missingEnv.length ? missingEnv.join(", ") : "無"}
-函式缺少：${missingFunctions.length ? missingFunctions.join(", ") : "無"}`);
+函式缺少：${missingFunctions.length ? missingFunctions.join(", ") : "無"}
+提醒：${warningLines.length ? warningLines.join("；") : "無"}`);
 };
 
 app.get('/api/system-diagnostics', async (req, res) => {
