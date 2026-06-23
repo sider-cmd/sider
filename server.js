@@ -7088,6 +7088,22 @@ const buildSystemDiagnostics = async () => {
       diagnostics.checks.lineData = okCheck(portfolio.size > 0, diagnostics.lineData);
       diagnostics.checks.cloudData = okCheck(Boolean(cloudState), diagnostics.cloudData);
       if (cloudState) {
+        const cloudTradeInflated =
+          diagnostics.lineData.trades > 0 &&
+          diagnostics.cloudData.trades > diagnostics.lineData.trades * 1.2;
+        const cloudDividendInflated =
+          diagnostics.lineData.dividends > 0 &&
+          diagnostics.cloudData.dividends > diagnostics.lineData.dividends * 1.2;
+        if (cloudTradeInflated || cloudDividendInflated) {
+          diagnostics.ok = false;
+          diagnostics.checks.cloudData = okCheck(false, {
+            ...diagnostics.cloudData,
+            lineTrades: diagnostics.lineData.trades,
+            lineDividends: diagnostics.lineData.dividends,
+            error: "Cloud data appears duplicated. Run LINE-to-cloud resync."
+          });
+          diagnostics.warnings.push("Cloud data appears duplicated. Run LINE-to-cloud resync.");
+        }
         if (diagnostics.lineData.trades !== diagnostics.cloudData.trades) {
           diagnostics.warnings.push("LINE 與雲端交易筆數不同，建議重新同步。");
         }
