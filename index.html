@@ -839,12 +839,16 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
 
   function recordKey(record) {
     return [
-      String(record?.id || ''),
       String(record?.date || ''),
       String(record?.type || ''),
       String(record?.symbol || ''),
       Number(record?.shares || 0),
-      Number(record?.price || 0)
+      Number(record?.price || 0),
+      Number(record?.fee || 0),
+      Number(record?.tax || 0),
+      Number(record?.cash || 0),
+      Number(record?.stock || 0),
+      Number(record?.nhi || 0)
     ].join('|');
   }
 
@@ -852,7 +856,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     const byKey = new Map();
     [...cloudRecords, ...localRecords].forEach(record => {
       const key = recordKey(record);
-      if (!key || key === '||||0|0') return;
+      if (!key || key === '||||0|0|0|0|0|0') return;
       byKey.set(key, record);
     });
     return [...byKey.values()].sort((a, b) => {
