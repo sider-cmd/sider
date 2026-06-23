@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-23 CLOUD-SYNC-SELF-REPAIR-1";
+const BOT_BUILD_VERSION = "2026-06-23 LINE-PUSH-THROTTLE-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -42,6 +42,7 @@ const intradayAnomalyPushLog = new Map();
 const intradayAnomalySettings = new Map();
 const dailyReportPushLog = new Set();
 const dailyReportSettings = new Map();
+const linePushCooldownLog = new Map();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -175,6 +176,21 @@ const DAILY_REPORT_TIMES = (process.env.DAILY_REPORT_TIMES || "14:35")
   .filter(Boolean);
 const DAILY_REPORT_ENABLED = process.env.DAILY_REPORT_ENABLED !== "false";
 const DAILY_REPORT_MODE = (process.env.DAILY_REPORT_MODE || "compact").toLowerCase();
+const LINE_SCHEDULED_PUSH_MIN_GAP_MS =
+  Number(process.env.LINE_SCHEDULED_PUSH_MIN_GAP_MS) || 45 * 60 * 1000;
+const LINE_ALERT_PUSH_MIN_GAP_MS =
+  Number(process.env.LINE_ALERT_PUSH_MIN_GAP_MS) || 30 * 60 * 1000;
+
+const shouldSkipLinePush = (ownerKey, group, minGapMs, force = false) => {
+  if (force || !minGapMs) return false;
+  const key = `${group}|${ownerKey}`;
+  const lastPushedAt = linePushCooldownLog.get(key) || 0;
+  return Date.now() - lastPushedAt < minGapMs;
+};
+
+const markLinePush = (ownerKey, group) => {
+  linePushCooldownLog.set(`${group}|${ownerKey}`, Date.now());
+};
 
 const defaultIntradayAnomalySettings = () => ({
   stockMovePercent: INTRADAY_STOCK_MOVE_PERCENT,
@@ -1376,6 +1392,10 @@ const checkAndPushDailyReports = async (force = false, onlyOwnerKey = null) => {
     if (!force && dailyReportPushLog.has(pushKey)) {
       continue;
     }
+    if (shouldSkipLinePush(ownerKey, "scheduled", LINE_SCHEDULED_PUSH_MIN_GAP_MS, force)) {
+      results.push({ ownerKey, pushed: false, skipped: "cooldown" });
+      continue;
+    }
 
     const text =
       setting.mode === "full"
@@ -1385,6 +1405,7 @@ const checkAndPushDailyReports = async (force = false, onlyOwnerKey = null) => {
       type: "text",
       text
     });
+    markLinePush(ownerKey, "scheduled");
     dailyReportPushLog.add(pushKey);
     results.push({ ownerKey, pushed: true });
   }
@@ -1755,6 +1776,9 @@ const checkAndPushTieredCostAlerts = async () => {
       if (!triggered) {
         continue;
       }
+      if (shouldSkipLinePush(alert.ownerKey, "price-alerts", LINE_ALERT_PUSH_MIN_GAP_MS)) {
+        continue;
+      }
 
       await client.pushMessage(alert.ownerKey, {
         type: "text",
@@ -1768,6 +1792,7 @@ const checkAndPushTieredCostAlerts = async () => {
 
 此分級提醒已自動關閉；需要再提醒請重新設定。`
       });
+      markLinePush(alert.ownerKey, "price-alerts");
 
       await deactivateTieredCostAlert(alert.ownerKey, alert);
     } catch (error) {
@@ -1811,6 +1836,9 @@ const checkAndPushPriceAlerts = async () => {
       if (!triggered) {
         continue;
       }
+      if (shouldSkipLinePush(alert.ownerKey, "price-alerts", LINE_ALERT_PUSH_MIN_GAP_MS)) {
+        continue;
+      }
 
       await client.pushMessage(alert.ownerKey, {
         type: "text",
@@ -1822,6 +1850,7 @@ const checkAndPushPriceAlerts = async () => {
 
 此提醒已自動關閉；如需再次提醒，請重新設定。`
       });
+      markLinePush(alert.ownerKey, "price-alerts");
 
       await deactivatePriceAlert(alert.ownerKey, alert.code, alert.direction);
     } catch (error) {
@@ -2501,12 +2530,17 @@ const checkAndPushIntradayDecisionAnalysis = async (force = false) => {
     if (!force && intradayAnalysisPushLog.has(pushKey)) {
       continue;
     }
+    if (shouldSkipLinePush(ownerKey, "scheduled", LINE_SCHEDULED_PUSH_MIN_GAP_MS, force)) {
+      results.push({ ownerKey, pushed: false, skipped: "cooldown" });
+      continue;
+    }
 
     const text = toLineSafeText(await buildIntradayDecisionAnalysis(ownerKey));
     await client.pushMessage(ownerKey, {
       type: "text",
       text
     });
+    markLinePush(ownerKey, "scheduled");
     intradayAnalysisPushLog.add(pushKey);
     results.push({ ownerKey, pushed: true });
   }
@@ -3717,11 +3751,15 @@ const checkAndPushIntradayAnomalies = async (force = false, onlyOwnerKey = null)
     if (!force && Date.now() - lastPushedAt < INTRADAY_ANOMALY_COOLDOWN_MS) {
       continue;
     }
+    if (shouldSkipLinePush(ownerKey, "scheduled", LINE_SCHEDULED_PUSH_MIN_GAP_MS, force)) {
+      continue;
+    }
 
     await client.pushMessage(ownerKey, {
       type: "text",
       text: result.text
     });
+    markLinePush(ownerKey, "scheduled");
     intradayAnomalyPushLog.set(ownerKey, Date.now());
   }
   return results;
@@ -7538,7 +7576,7 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-app.get('/alerts/check', async (req, res) => {
+app.get('/alerts/check', requireConfiguredWebSyncToken, async (req, res) => {
   try {
     await checkAndPushPriceAlerts();
     await checkAndPushTieredCostAlerts();
@@ -7549,7 +7587,7 @@ app.get('/alerts/check', async (req, res) => {
   }
 });
 
-app.get('/intraday/check', async (req, res) => {
+app.get('/intraday/check', requireConfiguredWebSyncToken, async (req, res) => {
   try {
     const results = await checkAndPushIntradayDecisionAnalysis(true);
     res.json({ ok: true, pushed: results.length, mode: "unified-analysis" });
@@ -7559,7 +7597,7 @@ app.get('/intraday/check', async (req, res) => {
   }
 });
 
-app.get('/major-holders/check', async (req, res) => {
+app.get('/major-holders/check', requireConfiguredWebSyncToken, async (req, res) => {
   try {
     const ownerKeys = await getPortfolioOwnerKeys();
     let pushed = 0;
@@ -7582,7 +7620,7 @@ app.get('/major-holders/check', async (req, res) => {
   }
 });
 
-app.get('/daily-report/check', async (req, res) => {
+app.get('/daily-report/check', requireConfiguredWebSyncToken, async (req, res) => {
   try {
     const results = await checkAndPushDailyReports(true);
     res.json({
@@ -7595,7 +7633,7 @@ app.get('/daily-report/check', async (req, res) => {
   }
 });
 
-app.get('/intraday/analysis/check', async (req, res) => {
+app.get('/intraday/analysis/check', requireConfiguredWebSyncToken, async (req, res) => {
   try {
     const results = await checkAndPushIntradayDecisionAnalysis(true);
     res.json({
@@ -7612,7 +7650,7 @@ app.get('/intraday/analysis/check', async (req, res) => {
   }
 });
 
-app.get('/intraday/anomaly/check', async (req, res) => {
+app.get('/intraday/anomaly/check', requireConfiguredWebSyncToken, async (req, res) => {
   try {
     if (typeof checkAndPushIntradayAnomalies !== "function") {
       return res.status(503).json({
