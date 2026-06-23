@@ -1014,7 +1014,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       allowSnapshotOverwriteOnce = false;
       state._updatedAt = Date.now();
       saveLocal();
-      const r = await fetch(CLOUD_STATE_API, {
+      const r = await fetch(CLOUD_STATE_API + (forceReplace ? '?force=1' : ''), {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json'
