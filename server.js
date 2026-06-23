@@ -6943,6 +6943,75 @@ const saveSupabaseWebCloudState = async (ownerKey, state) => {
   return true;
 };
 
+const webRecordKey = (record = {}) => [
+  String(record.id || ""),
+  String(record.date || ""),
+  String(record.type || ""),
+  String(record.symbol || record.code || ""),
+  Number(record.shares || 0),
+  Number(record.price || 0)
+].join("|");
+
+const mergeWebRecords = (incomingRecords = [], existingRecords = []) => {
+  const records = new Map();
+  [...existingRecords, ...incomingRecords].forEach((record) => {
+    const key = webRecordKey(record);
+    if (!key || key === "||||0|0") return;
+    records.set(key, record);
+  });
+  return [...records.values()].sort((a, b) => {
+    const dateCompare = String(a.date || "").localeCompare(String(b.date || ""));
+    if (dateCompare !== 0) return dateCompare;
+    return String(a.id || "").localeCompare(String(b.id || ""));
+  });
+};
+
+const normalizeWebSnapshot = (snapshot = {}) => {
+  const date = String(snapshot.date || "").trim();
+  if (!date) return null;
+  return {
+    date,
+    mv: Number(snapshot.mv || 0),
+    cost: Number(snapshot.cost || 0),
+    realized: Number(snapshot.realized || 0),
+    dividend: Number(snapshot.dividend || 0)
+  };
+};
+
+const mergeWebSnapshots = (incomingSnapshots = [], existingSnapshots = []) => {
+  const byDate = new Map();
+  [...existingSnapshots, ...incomingSnapshots].forEach((snapshot) => {
+    const normalized = normalizeWebSnapshot(snapshot);
+    if (!normalized) return;
+    const hasUsefulNumbers =
+      normalized.mv > 0 ||
+      normalized.cost > 0 ||
+      normalized.realized !== 0 ||
+      normalized.dividend !== 0;
+    if (!byDate.has(normalized.date) || hasUsefulNumbers) {
+      byDate.set(normalized.date, normalized);
+    }
+  });
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+};
+
+const mergeWebCloudState = (incomingState = {}, existingState = {}) => ({
+  ...existingState,
+  ...incomingState,
+  trades: mergeWebRecords(incomingState.trades || [], existingState.trades || []),
+  dividends: mergeWebRecords(incomingState.dividends || [], existingState.dividends || []),
+  snapshots: mergeWebSnapshots(incomingState.snapshots || [], existingState.snapshots || []),
+  prices: { ...(existingState.prices || {}), ...(incomingState.prices || {}) },
+  priceUpdated: { ...(existingState.priceUpdated || {}), ...(incomingState.priceUpdated || {}) },
+  customNames: { ...(existingState.customNames || {}), ...(incomingState.customNames || {}) },
+  excludedSymbols: normalizeExcludedWebSymbols({
+    ...(existingState.excludedSymbols || {}),
+    ...(incomingState.excludedSymbols || {})
+  }),
+  cfg: { ...(existingState.cfg || {}), ...(incomingState.cfg || {}) },
+  _updatedAt: Date.now()
+});
+
 const countWebState = (state = {}) => ({
   trades: Array.isArray(state.trades) ? state.trades.length : 0,
   dividends: Array.isArray(state.dividends) ? state.dividends.length : 0,
@@ -7142,10 +7211,17 @@ app.get('/api/cloud-state', requireWebSyncToken, async (req, res) => {
 });
 
 app.put('/api/cloud-state', requireWebSyncToken, async (req, res) => {
-  const state = req.body || {};
+  let state = req.body || {};
+  const forceReplace = req.query.force === "1" || req.body?._forceReplace === true;
   let supabaseError;
   try {
     const ownerKey = await getWebSyncOwnerKey();
+    if (!forceReplace) {
+      const existingState = await getSupabaseWebCloudState(ownerKey).catch(() => null);
+      if (existingState) {
+        state = mergeWebCloudState(state, existingState);
+      }
+    }
     await saveSupabaseWebCloudState(ownerKey, state);
 
     if (hasCloudState) {
@@ -7174,6 +7250,16 @@ app.put('/api/cloud-state', requireWebSyncToken, async (req, res) => {
   }
 
   try {
+    if (!forceReplace) {
+      const response = await axios.get(jsonBinUrl('/latest'), {
+        headers: jsonBinHeaders(),
+        timeout: 8000
+      }).catch(() => null);
+      const existingState = response?.data?.record || response?.data || null;
+      if (existingState && typeof existingState === "object") {
+        state = mergeWebCloudState(state, existingState);
+      }
+    }
     await axios.put(jsonBinUrl(), state, {
       headers: jsonBinHeaders({ "Content-Type": "application/json" }),
       timeout: 12000
