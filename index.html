@@ -837,7 +837,16 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     };
   }
 
-  function recordKey(record) {
+  function normalizedRecordId(record) {
+    const id = String(record?.id || '');
+    if (id.startsWith('cloud_line_')) return id.slice('cloud_'.length);
+    if (id.startsWith('line_')) return id;
+    if (id.startsWith('cloud_line_dividend_')) return id.slice('cloud_'.length);
+    if (id.startsWith('line_dividend_')) return id;
+    return '';
+  }
+
+  function recordContentKey(record) {
     return [
       String(record?.date || ''),
       String(record?.type || ''),
@@ -852,10 +861,23 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     ].join('|');
   }
 
+  function recordKey(record) {
+    return normalizedRecordId(record) || recordContentKey(record);
+  }
+
   function mergeRecords(localRecords = [], cloudRecords = []) {
+    const combinedRecords = [...cloudRecords, ...localRecords];
+    const contentKeysCoveredByLineIds = new Set(
+      combinedRecords
+        .filter(record => normalizedRecordId(record))
+        .map(record => recordContentKey(record))
+    );
     const byKey = new Map();
-    [...cloudRecords, ...localRecords].forEach(record => {
-      const key = recordKey(record);
+    combinedRecords.forEach(record => {
+      const normalizedId = normalizedRecordId(record);
+      const contentKey = recordContentKey(record);
+      if (!normalizedId && contentKeysCoveredByLineIds.has(contentKey)) return;
+      const key = normalizedId || contentKey;
       if (!key || key === '||||0|0|0|0|0|0') return;
       byKey.set(key, record);
     });
