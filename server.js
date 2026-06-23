@@ -6746,6 +6746,19 @@ const normalizeWebDividends = (dividends = []) => {
     );
 };
 
+const formatTaipeiDateKey = (value = new Date()) => {
+  const date = value instanceof Date ? value : new Date(value);
+  const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(safeDate);
+  const pick = (type) => parts.find((part) => part.type === type)?.value;
+  return `${pick("year")}-${pick("month")}-${pick("day")}`;
+};
+
 const replaceDividendsFromWeb = async (ownerKey, dividends) => {
   if (!hasPortfolioDb) {
     portfolioDividends.set(
@@ -6805,7 +6818,7 @@ const buildWebStateFromLine = async (ownerKey) => {
     trades.length > 0
       ? trades.map((trade) => ({
           id: `line_${trade.id || `${trade.code}_${trade.tradedAt}`}`,
-          date: String(trade.tradedAt || new Date().toISOString()).slice(0, 10),
+          date: formatTaipeiDateKey(trade.tradedAt || new Date()),
           type: trade.type,
           symbol: trade.code,
           name: dailyName(trade.code),
@@ -6816,7 +6829,7 @@ const buildWebStateFromLine = async (ownerKey) => {
         }))
       : [...portfolio.entries()].map(([code, position]) => ({
           id: `line_position_${code}`,
-          date: new Date().toISOString().slice(0, 10),
+          date: formatTaipeiDateKey(),
           type: "buy",
           symbol: code,
           name: dailyName(code),
@@ -6837,7 +6850,7 @@ const buildWebStateFromLine = async (ownerKey) => {
         const detail = JSON.parse(encodedDetail);
         return {
           id: `line_dividend_${dividend.id || `${dividend.code}_${dividend.received_at}`}`,
-          date: String(detail.date || dividend.received_at || new Date().toISOString()).slice(0, 10),
+          date: detail.date || formatTaipeiDateKey(dividend.received_at || new Date()),
           symbol: detail.symbol || dividend.code,
           name: detail.name || dailyName(detail.symbol || dividend.code),
           year: detail.year || new Date(dividend.received_at || Date.now()).getFullYear(),
@@ -6854,7 +6867,7 @@ const buildWebStateFromLine = async (ownerKey) => {
 
     return {
       id: `line_dividend_${dividend.id || `${dividend.code}_${dividend.received_at}`}`,
-      date: String(dividend.received_at || new Date().toISOString()).slice(0, 10),
+      date: formatTaipeiDateKey(dividend.received_at || new Date()),
       symbol: dividend.code,
       name: dailyName(dividend.code),
       year:
