@@ -837,6 +837,38 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     };
   }
 
+  function recordKey(record) {
+    return [
+      String(record?.id || ''),
+      String(record?.date || ''),
+      String(record?.type || ''),
+      String(record?.symbol || ''),
+      Number(record?.shares || 0),
+      Number(record?.price || 0)
+    ].join('|');
+  }
+
+  function mergeRecords(localRecords = [], cloudRecords = []) {
+    const byKey = new Map();
+    [...cloudRecords, ...localRecords].forEach(record => {
+      const key = recordKey(record);
+      if (!key || key === '||||0|0') return;
+      byKey.set(key, record);
+    });
+    return [...byKey.values()].sort((a, b) => {
+      const dateCompare = String(a.date || '').localeCompare(String(b.date || ''));
+      if (dateCompare !== 0) return dateCompare;
+      return String(a.id || '').localeCompare(String(b.id || ''));
+    });
+  }
+
+  function cloudHasMissingRecords(cloudData, localData) {
+    const localTrades = new Set((localData?.trades || []).map(recordKey));
+    const localDividends = new Set((localData?.dividends || []).map(recordKey));
+    return (cloudData?.trades || []).some(record => !localTrades.has(recordKey(record))) ||
+      (cloudData?.dividends || []).some(record => !localDividends.has(recordKey(record)));
+  }
+
   function mergeSnapshots(localSnapshots = [], cloudSnapshots = []) {
     const byDate = new Map();
     [...cloudSnapshots, ...localSnapshots].forEach(snapshot => {
@@ -872,6 +904,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     if (cloudTime > localTime) return true;
     if ((cloudData?.trades || []).length > (localData?.trades || []).length) return true;
     if ((cloudData?.dividends || []).length > (localData?.dividends || []).length) return true;
+    if (cloudHasMissingRecords(cloudData, localData)) return true;
     if ((cloudData?.snapshots || []).length > (localData?.snapshots || []).length) return true;
     if (latestSnapshotDate(cloudData) > latestSnapshotDate(localData)) return true;
     return Number(cloudData?.aiSummary?.updatedAt || 0) > Number(localData?.aiSummary?.updatedAt || 0);
@@ -960,18 +993,20 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     isSyncing = false;
   }
 
-  async function pushToCloud(silent) {
+  async function pushToCloud(silent, forceReplace = false) {
     if (isSyncing) {
-      setTimeout(() => pushToCloud(silent), 1000);
+      setTimeout(() => pushToCloud(silent, forceReplace), 1000);
       return;
     }
     isSyncing = true;
     setSyncStatus('syncing', '同步中');
     try {
-      if (!allowSnapshotOverwriteOnce) {
+      if (!allowSnapshotOverwriteOnce && !forceReplace) {
         const latest = await fetch(CLOUD_STATE_API);
         if (latest.ok) {
           const cloudData = await latest.json();
+          state.trades = mergeRecords(state.trades || [], cloudData.trades || []);
+          state.dividends = mergeRecords(state.dividends || [], cloudData.dividends || []);
           state.snapshots = mergeSnapshots(state.snapshots || [], cloudData.snapshots || []);
           state.excludedSymbols = mergeExcludedSymbols(state.excludedSymbols || {}, cloudData.excludedSymbols || {});
         }
@@ -2657,7 +2692,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   幕後自動備份處理 = () => {}; // 保持本地安全相容
 
   $('force-pull-btn').addEventListener('click', () => pullFromCloud(false, true));
-  $('force-push-btn').addEventListener('click', () => pushToCloud(false));
+  $('force-push-btn').addEventListener('click', () => pushToCloud(false, true));
   $('line-status-btn').addEventListener('click', checkLineSyncStatus);
   $('sync-health-btn').addEventListener('click', refreshSyncHealth);
   $('line-push-btn').addEventListener('click', pushWebStateToLine);
