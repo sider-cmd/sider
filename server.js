@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-21 CLOUD-SYNC-FALLBACK-1";
+const BOT_BUILD_VERSION = "2026-06-23 CLOUD-SYNC-SELF-REPAIR-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -6943,7 +6943,16 @@ const saveSupabaseWebCloudState = async (ownerKey, state) => {
   return true;
 };
 
-const webRecordKey = (record = {}) => [
+const normalizedWebRecordId = (record = {}) => {
+  const id = String(record.id || "");
+  if (id.startsWith("cloud_line_")) return id.slice("cloud_".length);
+  if (id.startsWith("line_")) return id;
+  if (id.startsWith("cloud_line_dividend_")) return id.slice("cloud_".length);
+  if (id.startsWith("line_dividend_")) return id;
+  return "";
+};
+
+const webRecordContentKey = (record = {}) => [
   String(record.date || ""),
   String(record.type || ""),
   String(record.symbol || record.code || ""),
@@ -6956,10 +6965,22 @@ const webRecordKey = (record = {}) => [
   Number(record.nhi || 0)
 ].join("|");
 
+const webRecordKey = (record = {}) =>
+  normalizedWebRecordId(record) || webRecordContentKey(record);
+
 const mergeWebRecords = (incomingRecords = [], existingRecords = []) => {
+  const combinedRecords = [...existingRecords, ...incomingRecords];
+  const contentKeysCoveredByLineIds = new Set(
+    combinedRecords
+      .filter((record) => normalizedWebRecordId(record))
+      .map((record) => webRecordContentKey(record))
+  );
   const records = new Map();
-  [...existingRecords, ...incomingRecords].forEach((record) => {
-    const key = webRecordKey(record);
+  combinedRecords.forEach((record) => {
+    const normalizedId = normalizedWebRecordId(record);
+    const contentKey = webRecordContentKey(record);
+    if (!normalizedId && contentKeysCoveredByLineIds.has(contentKey)) return;
+    const key = normalizedId || contentKey;
     if (!key || key === "||||0|0|0|0|0|0") return;
     records.set(key, record);
   });
@@ -7016,11 +7037,108 @@ const mergeWebCloudState = (incomingState = {}, existingState = {}) => ({
   _updatedAt: Date.now()
 });
 
+const cloudLineId = (id) => {
+  const value = String(id || "");
+  return value.startsWith("line_") ? `cloud_${value}` : value;
+};
+
+const buildCanonicalCloudStateFromLine = async (ownerKey, existingState = {}) => {
+  const lineState = await buildWebStateFromLine(ownerKey);
+  return {
+    ...existingState,
+    ...lineState,
+    trades: (lineState.trades || []).map((trade) => ({
+      ...trade,
+      id: cloudLineId(trade.id)
+    })),
+    dividends: (lineState.dividends || []).map((dividend) => ({
+      ...dividend,
+      id: cloudLineId(dividend.id)
+    })),
+    snapshots: existingState.snapshots || [],
+    prices: existingState.prices || {},
+    priceUpdated: existingState.priceUpdated || {},
+    cfg: existingState.cfg || {},
+    customNames: {
+      ...(existingState.customNames || {}),
+      ...(lineState.customNames || {})
+    },
+    excludedSymbols: normalizeExcludedWebSymbols({
+      ...(existingState.excludedSymbols || {}),
+      ...(lineState.excludedSymbols || {})
+    }),
+    _updatedAt: Date.now()
+  };
+};
+
 const countWebState = (state = {}) => ({
   trades: Array.isArray(state.trades) ? state.trades.length : 0,
   dividends: Array.isArray(state.dividends) ? state.dividends.length : 0,
   snapshots: Array.isArray(state.snapshots) ? state.snapshots.length : 0
 });
+
+const cloudCountsNeedRepair = (lineCounts = {}, cloudCounts = {}) =>
+  Number(lineCounts.trades || 0) > 0 &&
+  (Number(lineCounts.trades || 0) !== Number(cloudCounts.trades || 0) ||
+    Number(lineCounts.dividends || 0) !== Number(cloudCounts.dividends || 0));
+
+const repairWebCloudStateFromLine = async (ownerKey, reason = "manual") => {
+  const existingState = await getSupabaseWebCloudState(ownerKey).catch(() => null);
+  const repairedState = await buildCanonicalCloudStateFromLine(ownerKey, existingState || {});
+  await saveSupabaseWebCloudState(ownerKey, repairedState);
+
+  if (hasCloudState) {
+    axios.put(jsonBinUrl(), repairedState, {
+      headers: jsonBinHeaders({ "Content-Type": "application/json" }),
+      timeout: 8000
+    }).catch((error) => {
+      console.warn(`JSONBin repair backup failed: ${serviceErrorMessage(error)}`);
+    });
+  }
+
+  return {
+    ok: true,
+    reason,
+    counts: countWebState(repairedState),
+    updatedAt: repairedState._updatedAt
+  };
+};
+
+const checkAndRepairWebCloudState = async () => {
+  if (!hasPortfolioDb) return { ok: false, skipped: "portfolioDb disabled" };
+  const ownerKey = await getWebSyncOwnerKey();
+  const portfolio = await getPortfolio(ownerKey);
+  const trades = await getAllTrades(ownerKey);
+  const dividends = await getAllDividendsForWeb(ownerKey);
+  const lineCounts = {
+    holdings: portfolio.size,
+    trades: trades.length,
+    dividends: dividends.length
+  };
+  const cloudState = await getSupabaseWebCloudState(ownerKey).catch(() => null);
+  const cloudCounts = countWebState(cloudState || {});
+
+  if (!cloudState || cloudCountsNeedRepair(lineCounts, cloudCounts)) {
+    const repaired = await repairWebCloudStateFromLine(
+      ownerKey,
+      !cloudState ? "missing-cloud-state" : "line-cloud-count-mismatch"
+    );
+    return {
+      ok: true,
+      repaired: true,
+      lineCounts,
+      before: cloudCounts,
+      after: repaired.counts
+    };
+  }
+
+  return {
+    ok: true,
+    repaired: false,
+    lineCounts,
+    cloudCounts
+  };
+};
 
 const okCheck = (ok, detail = {}) => ({ ok: Boolean(ok), ...detail });
 
@@ -7298,6 +7416,34 @@ app.put('/api/cloud-state', requireWebSyncToken, async (req, res) => {
   }
 });
 
+app.get('/api/cloud-state/integrity', requireWebSyncToken, async (req, res) => {
+  try {
+    const result = await checkAndRepairWebCloudState();
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: serviceErrorMessage(error)
+    });
+  }
+});
+
+app.post('/api/cloud-state/repair', requireWebSyncToken, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const result = await repairWebCloudStateFromLine(
+      ownerKey,
+      req.body?.reason || req.query.reason || "manual-api"
+    );
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: serviceErrorMessage(error)
+    });
+  }
+});
+
 app.get('/api/web-sync/status', requireWebSyncToken, async (req, res) => {
   try {
     const ownerKey = await getWebSyncOwnerKey();
@@ -7482,6 +7628,7 @@ app.get('*', (req, res) => {
 
 // =================【4. 啟動伺服器】=================
 const PORT = process.env.PORT || 8080;
+const WEB_CLOUD_REPAIR_INTERVAL_MS = Number(process.env.WEB_CLOUD_REPAIR_INTERVAL_MS || 10 * 60 * 1000);
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
   if (hasPortfolioDb) {
@@ -7540,6 +7687,28 @@ app.listen(PORT, '0.0.0.0', () => {
         console.error("Daily portfolio report schedule failed:", error);
       });
     }, DAILY_REPORT_INTERVAL_MS);
+    setTimeout(() => {
+      checkAndRepairWebCloudState()
+        .then((result) => {
+          if (result?.repaired) {
+            console.warn("Web cloud state repaired on startup:", result);
+          }
+        })
+        .catch((error) => {
+          console.error("Web cloud state startup integrity check failed:", error);
+        });
+    }, 5000);
+    setInterval(() => {
+      checkAndRepairWebCloudState()
+        .then((result) => {
+          if (result?.repaired) {
+            console.warn("Web cloud state auto-repaired:", result);
+          }
+        })
+        .catch((error) => {
+          console.error("Web cloud state integrity check failed:", error);
+        });
+    }, WEB_CLOUD_REPAIR_INTERVAL_MS);
   } else {
     console.log("Auto price alerts disabled: database is not enabled");
   }
