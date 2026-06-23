@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-23 LINE-PUSH-THROTTLE-1";
+const BOT_BUILD_VERSION = "2026-06-23 LINE-PUSH-CALM-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -177,9 +177,9 @@ const DAILY_REPORT_TIMES = (process.env.DAILY_REPORT_TIMES || "14:35")
 const DAILY_REPORT_ENABLED = process.env.DAILY_REPORT_ENABLED !== "false";
 const DAILY_REPORT_MODE = (process.env.DAILY_REPORT_MODE || "compact").toLowerCase();
 const LINE_SCHEDULED_PUSH_MIN_GAP_MS =
-  Number(process.env.LINE_SCHEDULED_PUSH_MIN_GAP_MS) || 45 * 60 * 1000;
+  Number(process.env.LINE_SCHEDULED_PUSH_MIN_GAP_MS) || 60 * 60 * 1000;
 const LINE_ALERT_PUSH_MIN_GAP_MS =
-  Number(process.env.LINE_ALERT_PUSH_MIN_GAP_MS) || 30 * 60 * 1000;
+  Number(process.env.LINE_ALERT_PUSH_MIN_GAP_MS) || 90 * 60 * 1000;
 
 const shouldSkipLinePush = (ownerKey, group, minGapMs, force = false) => {
   if (force || !minGapMs) return false;
@@ -7212,7 +7212,9 @@ const buildSystemDiagnostics = async () => {
       intradayAnomalyEnabled:
         INTRADAY_ANOMALY_ENABLED && typeof checkAndPushIntradayAnomalies === "function",
       dailyReportEnabled: DAILY_REPORT_ENABLED,
-      dailyReportTimes: DAILY_REPORT_TIMES
+      dailyReportTimes: DAILY_REPORT_TIMES,
+      scheduledPushCooldownMinutes: Math.round(LINE_SCHEDULED_PUSH_MIN_GAP_MS / 60000),
+      alertPushCooldownMinutes: Math.round(LINE_ALERT_PUSH_MIN_GAP_MS / 60000)
     },
     functions: {
       priceAlerts: typeof checkAndPushPriceAlerts === "function",
