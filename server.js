@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-23 LINE-PUSH-CALM-1";
+const BOT_BUILD_VERSION = "2026-06-23 PROFESSIONAL-ACTION-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -2347,6 +2347,85 @@ const recommendIntradayAction = (item, chip, margin, level) => {
   return { action: "續抱", reason: "未達停損或減碼條件" };
 };
 
+const recommendProfessionalIntradayAction = (item, chip, margin, level) => {
+  const profitPercent = Number(item?.profitPercent || 0);
+  const weightPercent = Number(item?.weightPercent || 0);
+  const chipTotal = chip?.available ? Number(chip.total || 0) : null;
+  const foreign = chip?.available ? Number(chip.foreign || 0) : null;
+  const marginChange = margin?.available ? Number(margin.marginChange || 0) : null;
+  const chipWeak = chipTotal !== null && chipTotal < 0;
+  const foreignWeak = foreign !== null && foreign < 0;
+  const marginRisk = marginChange !== null && marginChange > 0 && profitPercent < 0;
+  const chipStrong = chipTotal !== null && chipTotal > 0;
+  const foreignStrong = foreign !== null && foreign >= 0;
+  const chipUnknown = chipTotal === null && foreign === null;
+  const negativeSignals = [chipWeak, foreignWeak, marginRisk, weightPercent >= 20].filter(Boolean).length;
+  const reasons = [];
+
+  if (profitPercent <= -20 && negativeSignals >= 2) {
+    reasons.push("虧損已深且不是單一成本因素");
+    if (chipWeak) reasons.push("三大法人偏賣");
+    if (foreignWeak) reasons.push("外資偏賣");
+    if (marginRisk) reasons.push("虧損中融資增加");
+    if (weightPercent >= 20) reasons.push("部位占比過高");
+    return { action: "停損", reason: reasons.join("；") };
+  }
+
+  if (profitPercent <= -12 && negativeSignals >= 2) {
+    reasons.push("跌幅擴大且籌碼/資金面同步轉弱");
+    if (chipWeak) reasons.push("三大法人賣超");
+    if (foreignWeak) reasons.push("外資賣超");
+    if (marginRisk) reasons.push("融資增加代表籌碼壓力升高");
+    if (weightPercent >= 20) reasons.push("部位過重需先控風險");
+    return { action: "減碼", reason: reasons.join("；") };
+  }
+
+  if (
+    (profitPercent >= 25 && (chipWeak || weightPercent >= 18)) ||
+    (weightPercent >= 22 && profitPercent >= 8)
+  ) {
+    if (profitPercent >= 25) reasons.push("獲利已高，優先保護獲利");
+    if (weightPercent >= 18) reasons.push("部位占比偏高");
+    if (chipWeak) reasons.push("法人開始偏賣");
+    return { action: "減碼", reason: reasons.join("；") || "獲利與部位風險偏高" };
+  }
+
+  if (
+    profitPercent >= -6 &&
+    profitPercent <= 12 &&
+    weightPercent < 12 &&
+    chipStrong &&
+    foreignStrong &&
+    !marginRisk
+  ) {
+    return { action: "可加碼", reason: "法人偏買；外資未轉弱；部位占比仍可控" };
+  }
+
+  if (profitPercent <= -10) {
+    reasons.push("低於成本但不能只因成本線賣出");
+    if (chipUnknown) reasons.push("法人/外資資料不足，先觀察下一次籌碼");
+    if (!chipWeak && !foreignWeak) reasons.push("未見法人與外資同步轉弱");
+    if (!marginRisk) reasons.push("融資未形成明確惡化訊號");
+    return { action: "續抱觀察", reason: reasons.join("；") };
+  }
+
+  if (profitPercent >= 18) {
+    if (chipWeak || foreignWeak) {
+      return { action: "續抱偏保守", reason: "已有獲利但法人/外資轉弱；可設移動停利，不急著一次出清" };
+    }
+    return { action: "續抱", reason: "仍有獲利且未見明確籌碼轉弱，續抱並追蹤停利點" };
+  }
+
+  if (chipWeak || foreignWeak || marginRisk) {
+    if (chipWeak) reasons.push("法人偏賣");
+    if (foreignWeak) reasons.push("外資偏賣");
+    if (marginRisk) reasons.push("融資增加");
+    return { action: "續抱偏保守", reason: `${reasons.join("；")}，但尚未達減碼條件` };
+  }
+
+  return { action: "續抱", reason: "價格、部位與籌碼未出現足夠明確的加碼或減碼訊號" };
+};
+
 const getIntradayAnalysisSnapshots = async (entries) =>
   Promise.all(
     entries.map(async ([code, position]) => {
@@ -2436,7 +2515,7 @@ const buildIntradayDecisionAnalysis = async (ownerKey, stockNameLookup = {}) => 
         fetchMarginChipSummary(item.code)
       ]);
       const level = analysisLevelForHolding(item, chip, margin, item.weightPercent);
-      const action = recommendIntradayAction(item, chip, margin, level);
+      const action = recommendProfessionalIntradayAction(item, chip, margin, level);
       return { item, chip, margin, level, action };
     })
   );
@@ -2447,7 +2526,7 @@ const buildIntradayDecisionAnalysis = async (ownerKey, stockNameLookup = {}) => 
     .map((item, index) => {
       const detailed = analysesByCode.get(item.code);
       const level = detailed?.level || analysisLevelForHolding(item, null, null, item.weightPercent);
-      const action = detailed?.action || recommendIntradayAction(item, null, null, level);
+      const action = detailed?.action || recommendProfessionalIntradayAction(item, null, null, level);
       return `${index + 1}. ${stockLabel(item.code, item.name)}：${action.action}｜${action.reason}`;
     })
     .join("\n");
