@@ -6519,6 +6519,16 @@ const requireWebSyncToken = (req, res, next) => {
   return next();
 };
 
+const requireConfiguredWebSyncToken = (req, res, next) => {
+  if (!process.env.WEB_SYNC_TOKEN) {
+    return res.status(503).json({
+      ok: false,
+      error: "WEB_SYNC_TOKEN is not configured"
+    });
+  }
+  return requireWebSyncToken(req, res, next);
+};
+
 const getWebSyncOwnerKey = async () => {
   const configured =
     process.env.WEB_SYNC_OWNER_KEY ||
@@ -7416,7 +7426,7 @@ app.put('/api/cloud-state', requireWebSyncToken, async (req, res) => {
   }
 });
 
-app.get('/api/cloud-state/integrity', requireWebSyncToken, async (req, res) => {
+app.get('/api/cloud-state/integrity', requireConfiguredWebSyncToken, async (req, res) => {
   try {
     const result = await checkAndRepairWebCloudState();
     res.json(result);
@@ -7428,7 +7438,7 @@ app.get('/api/cloud-state/integrity', requireWebSyncToken, async (req, res) => {
   }
 });
 
-app.post('/api/cloud-state/repair', requireWebSyncToken, async (req, res) => {
+app.post('/api/cloud-state/repair', requireConfiguredWebSyncToken, async (req, res) => {
   try {
     const ownerKey = await getWebSyncOwnerKey();
     const result = await repairWebCloudStateFromLine(
