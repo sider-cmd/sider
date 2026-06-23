@@ -2676,6 +2676,23 @@ async function handleEvent(event) {
   }
 
 
+  if (["系統健檢", "系統狀態", "健檢"].includes(marketInput)) {
+    try {
+      const diagnostics = await buildSystemDiagnostics();
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: buildSystemDiagnosticsText(diagnostics)
+      });
+    } catch (error) {
+      console.error("System diagnostics failed:", error);
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: `系統健檢失敗：${serviceErrorMessage(error)}`
+      });
+    }
+  }
+
+
   if (marketInput === "指令" || marketInput === "說明") {
     return client.replyMessage(event.replyToken, {
       type: "text",
@@ -6912,6 +6929,144 @@ const saveSupabaseWebCloudState = async (ownerKey, state) => {
   );
   return true;
 };
+
+const countWebState = (state = {}) => ({
+  trades: Array.isArray(state.trades) ? state.trades.length : 0,
+  dividends: Array.isArray(state.dividends) ? state.dividends.length : 0,
+  snapshots: Array.isArray(state.snapshots) ? state.snapshots.length : 0
+});
+
+const okCheck = (ok, detail = {}) => ({ ok: Boolean(ok), ...detail });
+
+const buildSystemDiagnostics = async () => {
+  const checkedAt = new Date().toISOString();
+  const diagnostics = {
+    ok: true,
+    checkedAt,
+    version: BOT_BUILD_VERSION,
+    env: {
+      line: Boolean(config.channelAccessToken && config.channelSecret),
+      openai: Boolean(process.env.OPENAI_API_KEY),
+      portfolioDb: hasPortfolioDb,
+      cloudState: hasCloudState,
+      finMind: Boolean(FINMIND_TOKEN),
+      webSyncOwnerKey: Boolean(process.env.WEB_SYNC_OWNER_KEY || process.env.LINE_USER_ID || process.env.LINE_OWNER_KEY),
+      publicBaseUrl: Boolean(process.env.PUBLIC_BASE_URL)
+    },
+    schedules: {
+      priceAlertsMs: ALERT_CHECK_INTERVAL_MS,
+      intradayAnalysisEnabled: INTRADAY_ANALYSIS_ENABLED,
+      intradayAnalysisTimes: INTRADAY_ANALYSIS_TIMES,
+      intradayAnomalyEnabled: INTRADAY_ANOMALY_ENABLED,
+      dailyReportEnabled: DAILY_REPORT_ENABLED,
+      dailyReportTimes: DAILY_REPORT_TIMES
+    },
+    functions: {
+      priceAlerts: typeof checkAndPushPriceAlerts === "function",
+      tieredCostAlerts: typeof checkAndPushTieredCostAlerts === "function",
+      intradayDecisionAnalysis: typeof checkAndPushIntradayDecisionAnalysis === "function",
+      intradayAnomalies: typeof checkAndPushIntradayAnomalies === "function",
+      dailyReports: typeof checkAndPushDailyReports === "function",
+      majorHolderWeekly: typeof buildMajorHolderWeeklyReport === "function"
+    },
+    checks: {}
+  };
+
+  try {
+    const ownerKeys = await getPortfolioOwnerKeys();
+    diagnostics.ownerKeys = ownerKeys.length;
+    diagnostics.checks.ownerKeys = okCheck(ownerKeys.length > 0, {
+      count: ownerKeys.length
+    });
+
+    if (ownerKeys.length > 0) {
+      const ownerKey = await getWebSyncOwnerKey();
+      const portfolio = await getPortfolio(ownerKey);
+      const trades = await getAllTrades(ownerKey);
+      const dividends = await getAllDividendsForWeb(ownerKey);
+      const cloudState = await getSupabaseWebCloudState(ownerKey).catch(() => null);
+
+      diagnostics.ownerKeyMasked = `${ownerKey.slice(0, 6)}...${ownerKey.slice(-4)}`;
+      diagnostics.lineData = {
+        holdings: portfolio.size,
+        trades: trades.length,
+        dividends: dividends.length
+      };
+      diagnostics.cloudData = countWebState(cloudState || {});
+      diagnostics.checks.lineData = okCheck(portfolio.size > 0, diagnostics.lineData);
+      diagnostics.checks.cloudData = okCheck(Boolean(cloudState), diagnostics.cloudData);
+    }
+  } catch (error) {
+    diagnostics.ok = false;
+    diagnostics.checks.database = okCheck(false, {
+      error: serviceErrorMessage(error)
+    });
+  }
+
+  try {
+    const quote = await fetchAlertYahooQuote("2330", 5000);
+    diagnostics.checks.quote = okCheck(Number.isFinite(Number(quote.regularMarketPrice)), {
+      symbol: "2330",
+      price: Number(quote.regularMarketPrice || 0)
+    });
+  } catch (error) {
+    diagnostics.ok = false;
+    diagnostics.checks.quote = okCheck(false, {
+      symbol: "2330",
+      error: serviceErrorMessage(error)
+    });
+  }
+
+  const requiredFunctionOk = Object.values(diagnostics.functions).every(Boolean);
+  const requiredEnvOk = diagnostics.env.line && diagnostics.env.portfolioDb && diagnostics.env.finMind;
+  diagnostics.ok = diagnostics.ok && requiredFunctionOk && requiredEnvOk;
+  diagnostics.checks.requiredFunctions = okCheck(requiredFunctionOk);
+  diagnostics.checks.requiredEnv = okCheck(requiredEnvOk);
+  return diagnostics;
+};
+
+const buildSystemDiagnosticsText = (diagnostics) => {
+  const checkMark = (ok) => (ok ? "✅" : "⚠️");
+  const lineData = diagnostics.lineData || {};
+  const cloudData = diagnostics.cloudData || {};
+  const quote = diagnostics.checks.quote || {};
+  const missingEnv = Object.entries(diagnostics.env || {})
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
+  const missingFunctions = Object.entries(diagnostics.functions || {})
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
+
+  return toLineSafeText(`🩺 系統健檢
+狀態：${checkMark(diagnostics.ok)} ${diagnostics.ok ? "正常" : "需要檢查"}
+版本：${diagnostics.version}
+時間：${diagnostics.checkedAt}
+
+資料
+LINE：持股 ${lineData.holdings ?? 0}｜交易 ${lineData.trades ?? 0}｜股利 ${lineData.dividends ?? 0}
+雲端：交易 ${cloudData.trades ?? 0}｜股利 ${cloudData.dividends ?? 0}｜快照 ${cloudData.snapshots ?? 0}
+報價：${quote.ok ? `2330 ${quote.price}` : `失敗 ${quote.error || ""}`}
+
+排程
+盤中分析：${diagnostics.schedules.intradayAnalysisEnabled ? diagnostics.schedules.intradayAnalysisTimes.join(", ") : "停用"}
+每日報告：${diagnostics.schedules.dailyReportEnabled ? diagnostics.schedules.dailyReportTimes.join(", ") : "停用"}
+盤中異常：${diagnostics.schedules.intradayAnomalyEnabled ? "啟用" : "停用"}
+
+環境缺少：${missingEnv.length ? missingEnv.join(", ") : "無"}
+函式缺少：${missingFunctions.length ? missingFunctions.join(", ") : "無"}`);
+};
+
+app.get('/api/system-diagnostics', async (req, res) => {
+  try {
+    const diagnostics = await buildSystemDiagnostics();
+    res.status(diagnostics.ok ? 200 : 503).json(diagnostics);
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: serviceErrorMessage(error)
+    });
+  }
+});
 
 app.get('/api/cloud-state', requireWebSyncToken, async (req, res) => {
   let supabaseError;
