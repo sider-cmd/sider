@@ -6944,19 +6944,23 @@ const saveSupabaseWebCloudState = async (ownerKey, state) => {
 };
 
 const webRecordKey = (record = {}) => [
-  String(record.id || ""),
   String(record.date || ""),
   String(record.type || ""),
   String(record.symbol || record.code || ""),
   Number(record.shares || 0),
-  Number(record.price || 0)
+  Number(record.price || 0),
+  Number(record.fee || 0),
+  Number(record.tax || 0),
+  Number(record.cash || 0),
+  Number(record.stock || 0),
+  Number(record.nhi || 0)
 ].join("|");
 
 const mergeWebRecords = (incomingRecords = [], existingRecords = []) => {
   const records = new Map();
   [...existingRecords, ...incomingRecords].forEach((record) => {
     const key = webRecordKey(record);
-    if (!key || key === "||||0|0") return;
+    if (!key || key === "||||0|0|0|0|0|0") return;
     records.set(key, record);
   });
   return [...records.values()].sort((a, b) => {
