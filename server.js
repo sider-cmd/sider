@@ -2259,6 +2259,65 @@ const analysisLevelForHolding = (item, chip, margin, weightPercent) => {
   return { level: "觀察", reasons: reasons.length ? reasons : ["未出現明顯籌碼或成本警訊"] };
 };
 
+const recommendIntradayAction = (item, chip, margin, level) => {
+  const profitPercent = Number(item?.profitPercent || 0);
+  const weightPercent = Number(item?.weightPercent || 0);
+  const chipTotal = chip?.available ? Number(chip.total || 0) : null;
+  const foreign = chip?.available ? Number(chip.foreign || 0) : null;
+  const marginChange = margin?.available ? Number(margin.marginChange || 0) : null;
+  const chipWeak = chipTotal !== null && chipTotal < 0;
+  const foreignWeak = foreign !== null && foreign < 0;
+  const marginRisk = marginChange !== null && marginChange > 0 && profitPercent < 0;
+  const reasons = [];
+
+  if (profitPercent <= -18 || (profitPercent <= -12 && (chipWeak || foreignWeak || marginRisk))) {
+    if (profitPercent <= -18) reasons.push("虧損已深");
+    if (chipWeak) reasons.push("法人賣超");
+    if (foreignWeak) reasons.push("外資賣超");
+    if (marginRisk) reasons.push("虧損中融資增加");
+    return { action: "停損", reason: reasons.join("、") || "跌幅超過風控線" };
+  }
+
+  if (
+    (profitPercent >= 25 && (chipWeak || weightPercent >= 15)) ||
+    (weightPercent >= 20 && profitPercent >= 8) ||
+    (level?.level === "高風險" && profitPercent > -18)
+  ) {
+    if (profitPercent >= 25) reasons.push("獲利較高");
+    if (weightPercent >= 20) reasons.push("部位偏重");
+    if (chipWeak) reasons.push("法人轉弱");
+    if (level?.level === "高風險") reasons.push("風險分數偏高");
+    return { action: "減碼", reason: reasons.join("、") || "先降低波動風險" };
+  }
+
+  if (
+    profitPercent > -5 &&
+    profitPercent < 15 &&
+    weightPercent < 15 &&
+    chipTotal !== null &&
+    chipTotal > 0 &&
+    (foreign === null || foreign >= 0) &&
+    !marginRisk
+  ) {
+    if (chipTotal > 0) reasons.push("法人偏買");
+    if (foreign === null || foreign >= 0) reasons.push("外資未轉弱");
+    if (weightPercent < 15) reasons.push("部位仍可控");
+    return { action: "可加碼", reason: reasons.join("、") };
+  }
+
+  if (profitPercent <= -8 || level?.level === "注意") {
+    if (profitPercent <= -8) reasons.push("跌破成本");
+    if (chipWeak) reasons.push("籌碼偏弱");
+    return { action: "減碼", reason: reasons.join("、") || "先觀察是否續弱" };
+  }
+
+  if (profitPercent >= 18) {
+    return { action: "續抱", reason: "已有獲利，留意分批停利點" };
+  }
+
+  return { action: "續抱", reason: "未達停損或減碼條件" };
+};
+
 const getIntradayAnalysisSnapshots = async (entries) =>
   Promise.all(
     entries.map(async ([code, position]) => {
@@ -2348,19 +2407,32 @@ const buildIntradayDecisionAnalysis = async (ownerKey, stockNameLookup = {}) => 
         fetchMarginChipSummary(item.code)
       ]);
       const level = analysisLevelForHolding(item, chip, margin, item.weightPercent);
-      return { item, chip, margin, level };
+      const action = recommendIntradayAction(item, chip, margin, level);
+      return { item, chip, margin, level, action };
     })
   );
+
+  const analysesByCode = new Map(analyses.map((analysis) => [analysis.item.code, analysis]));
+  const actionRows = [...rows]
+    .sort((a, b) => a.profitPercent - b.profitPercent)
+    .map((item, index) => {
+      const detailed = analysesByCode.get(item.code);
+      const level = detailed?.level || analysisLevelForHolding(item, null, null, item.weightPercent);
+      const action = detailed?.action || recommendIntradayAction(item, null, null, level);
+      return `${index + 1}. ${stockLabel(item.code, item.name)}：${action.action}｜${action.reason}`;
+    })
+    .join("\n");
 
   const warningRows = analyses
     .sort((a, b) => {
       const order = { "高風險": 0, "注意": 1, "可檢視停利": 2, "觀察": 3 };
       return order[a.level.level] - order[b.level.level] || a.item.profitPercent - b.item.profitPercent;
     })
-    .map(({ item, chip, margin, level }, index) => {
+    .map(({ item, chip, margin, level, action }, index) => {
       const name = stockLabel(item.code, item.name || stockNameLookup[item.code]);
       return `${index + 1}. ${name}
 等級：${level.level}
+建議：${action.action}（${action.reason}）
 持股損益：${signedMoney(item.profit)} (${signedPercent(item.profitPercent)})，占比 ${item.weightPercent.toFixed(1)}%
 ${chip.text}
 ${margin.text}
@@ -2390,6 +2462,9 @@ ${now.dateKey} ${now.timeKey}
 總成本：${formatBriefMoney(totals.totalCost)} 元
 未實現損益：${signedMoney(totals.totalProfit)} (${signedPercent(totals.totalPercent)})
 報價失敗：${totals.failedCount} 檔
+
+全部持股建議
+${actionRows}
 
 需要優先看的持股
 ${warningRows}
