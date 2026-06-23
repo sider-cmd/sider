@@ -605,10 +605,11 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         <div class="card-title">同步健康檢查</div>
         <button class="btn btn-sm btn-ghost" id="sync-health-btn">立即檢查</button>
       </div>
-      <div id="sync-health-grid" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;">
+      <div id="sync-health-grid" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;">
         <div class="note" style="margin:0;padding:10px;"><span class="muted">本機資料</span><br><strong id="sync-health-local">尚未檢查</strong></div>
         <div class="note" style="margin:0;padding:10px;"><span class="muted">雲端備份</span><br><strong id="sync-health-cloud">尚未檢查</strong></div>
         <div class="note" style="margin:0;padding:10px;"><span class="muted">LINE 助理</span><br><strong id="sync-health-line">尚未檢查</strong></div>
+        <div class="note" style="margin:0;padding:10px;"><span class="muted">系統後端</span><br><strong id="sync-health-system">尚未檢查</strong></div>
       </div>
       <div class="muted" id="sync-health-status" style="font-size:12px;margin-top:10px;line-height:1.7;">開啟設定頁時會自動檢查</div>
     </div>
@@ -2511,12 +2512,17 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     localEl.textContent = `交易 ${local.trades}｜股利 ${local.dividends}｜快照 ${local.snapshots}`;
     localEl.style.color = 'var(--text)';
 
-    const [cloudResult, lineResult] = await Promise.allSettled([
+    const [cloudResult, lineResult, systemResult] = await Promise.allSettled([
       fetch(CLOUD_STATE_API).then(async response => {
         if (!response.ok) throw new Error('HTTP ' + response.status);
         return response.json();
       }),
-      lineSyncRequest('/api/web-sync/status')
+      lineSyncRequest('/api/web-sync/status'),
+      fetch('/api/system-diagnostics').then(async response => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'HTTP ' + response.status);
+        return data;
+      })
     ]);
 
     let cloudMatches = false;
@@ -2551,6 +2557,21 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       $('sync-health-line').textContent = '目前無法連線';
       $('sync-health-line').style.color = 'var(--up)';
       problems.push('LINE 檢查失敗');
+    }
+
+    if (systemResult.status === 'fulfilled') {
+      const systemData = systemResult.value;
+      const systemEl = $('sync-health-system');
+      const quote = systemData.checks?.quote;
+      systemEl.textContent = systemData.ok
+        ? `正常｜報價 ${quote?.price || 'OK'}`
+        : '需要檢查';
+      systemEl.style.color = systemData.ok ? 'var(--down)' : 'var(--warn)';
+      if (!systemData.ok) problems.push('後端需要檢查');
+    } else {
+      $('sync-health-system').textContent = '目前無法連線';
+      $('sync-health-system').style.color = 'var(--up)';
+      problems.push('後端檢查失敗');
     }
 
     const checkedAt = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
