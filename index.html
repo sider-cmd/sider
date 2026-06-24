@@ -762,6 +762,46 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     '00679B':'元大美債20年','00772B':'中信高評級公司債','00937B':'群益ESG投等債20+'
   };
 
+  const CLEAN_STOCK_NAMES = {
+    '00929': '復華台灣科技優息',
+    '1513': '中興電',
+    '1802': '台玻',
+    '2330': '台積電',
+    '2344': '華邦電',
+    '2353': '宏碁',
+    '2368': '金像電',
+    '2409': '友達',
+    '2449': '京元電子',
+    '2454': '聯發科',
+    '2812': '台中銀',
+    '2834': '臺企銀',
+    '3037': '欣興',
+    '3455': '由田',
+    '3481': '群創',
+    '3552': '同致',
+    '3680': '家登',
+    '4132': '國鼎',
+    '6125': '廣運',
+    '6531': '愛普*',
+    '7769': '鴻勁',
+    '8046': '南電'
+  };
+
+  function isBrokenName(value) {
+    const text = String(value || '').trim();
+    if (!text) return true;
+    const questionMarks = (text.match(/\?/g) || []).length;
+    const replacementMarks = (text.match(/\uFFFD/g) || []).length;
+    const visibleLength = text.replace(/\s/g, '').length || 1;
+    return questionMarks + replacementMarks >= 2 || questionMarks / visibleLength >= 0.5;
+  }
+
+  function cleanStockName(symbol, name) {
+    const code = String(symbol || '').trim();
+    if (CLEAN_STOCK_NAMES[code]) return CLEAN_STOCK_NAMES[code];
+    return isBrokenName(name) ? '' : String(name || '').trim();
+  }
+
   // 核心變數宣告（修正：補上缺失的編輯 ID 變數）
   let editingTradeId = null;
   let editingDivId = null;
@@ -819,7 +859,11 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     s.priceUpdated = s.priceUpdated || {};
     s.snapshots = s.snapshots || [];
     s.cfg = { ...DEFAULT_CFG, ...(s.cfg || {}) };
-    s.customNames = s.customNames || {};
+    s.customNames = Object.fromEntries(
+      Object.entries(s.customNames || {})
+        .map(([symbol, name]) => [symbol, cleanStockName(symbol, name)])
+        .filter(([, name]) => name)
+    );
     s.excludedSymbols = normalizeExcludedSymbols(s.excludedSymbols);
     if (s.cfg.autoQuote === undefined) s.cfg.autoQuote = true;
     return s;
@@ -936,6 +980,12 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     return Number(cloudData?.aiSummary?.updatedAt || 0) > Number(localData?.aiSummary?.updatedAt || 0);
   }
 
+  function hasBrokenNames(data) {
+    return Object.values(data?.customNames || {}).some(isBrokenName) ||
+      (data?.trades || []).some(item => item?.name && isBrokenName(item.name)) ||
+      (data?.dividends || []).some(item => item?.name && isBrokenName(item.name));
+  }
+
 
   function isEmptyPortfolioData(data) {
     return !data || ((data.trades || []).length === 0 && (data.dividends || []).length === 0);
@@ -975,7 +1025,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       const cloudData = await r.json();
       const cloudTime = cloudData._updatedAt || 0;
       const localIsEmpty = (state.trades || []).length === 0 && (state.dividends || []).length === 0;
-      const useCloudState = force || localIsEmpty || cloudStateIsFresher(cloudData, state);
+      const localHasBrokenNames = hasBrokenNames(state);
+      const useCloudState = force || localIsEmpty || localHasBrokenNames || cloudStateIsFresher(cloudData, state);
       const mergedSnapshots = useCloudState
         ? mergeSnapshots(cloudData.snapshots || [], state.snapshots || [])
         : mergeSnapshots(state.snapshots || [], cloudData.snapshots || []);
@@ -1118,12 +1169,17 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   function lookupName(symbol) {
     const s = String(symbol).trim();
     if (!s) return '';
-    if (state.customNames[s]) return state.customNames[s];
-    if (STOCK_DB[s]) return STOCK_DB[s];
-    const t = state.trades.find(x => x.symbol === s && x.name);
-    if (t) return t.name;
-    const d = state.dividends.find(x => x.symbol === s && x.name);
-    if (d) return d.name;
+    const candidates = [
+      CLEAN_STOCK_NAMES[s],
+      state.customNames?.[s],
+      STOCK_DB[s],
+      state.trades.find(x => x.symbol === s && x.name && !isBrokenName(x.name))?.name,
+      state.dividends.find(x => x.symbol === s && x.name && !isBrokenName(x.name))?.name
+    ];
+    for (const name of candidates) {
+      const cleaned = cleanStockName(s, name);
+      if (cleaned) return cleaned;
+    }
     return '';
   }
 
@@ -1292,9 +1348,10 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     const by = {};
     const sorted = [...source.trades].sort((a,b) => a.date.localeCompare(b.date));
     for (const t of sorted) {
-      if (!by[t.symbol]) by[t.symbol] = { symbol: t.symbol, name: t.name || lookupName(t.symbol), shares: 0, totalCost: 0, realized: 0 };
+      const tradeName = cleanStockName(t.symbol, t.name) || lookupName(t.symbol);
+      if (!by[t.symbol]) by[t.symbol] = { symbol: t.symbol, name: tradeName, shares: 0, totalCost: 0, realized: 0 };
       const h = by[t.symbol];
-      h.name = t.name || h.name || lookupName(t.symbol);
+      h.name = tradeName || h.name || lookupName(t.symbol);
       if (t.type === 'buy') {
         h.shares += t.shares;
         h.totalCost += t.shares * t.price + (t.fee || 0);
