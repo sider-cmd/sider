@@ -1282,9 +1282,15 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     if (autoQuoteTimer) { clearInterval(autoQuoteTimer); autoQuoteTimer = null; }
   }
 
-  function computeHoldings() {
+  function computeHoldingsFromData(data) {
+    const source = normalizeStateShape({
+      trades: data?.trades || [],
+      dividends: data?.dividends || [],
+      excludedSymbols: data?.excludedSymbols || state.excludedSymbols || {},
+      customNames: data?.customNames || state.customNames || {}
+    });
     const by = {};
-    const sorted = [...state.trades].sort((a,b) => a.date.localeCompare(b.date));
+    const sorted = [...source.trades].sort((a,b) => a.date.localeCompare(b.date));
     for (const t of sorted) {
       if (!by[t.symbol]) by[t.symbol] = { symbol: t.symbol, name: t.name || lookupName(t.symbol), shares: 0, totalCost: 0, realized: 0 };
       const h = by[t.symbol];
@@ -1303,15 +1309,24 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         if (h.shares <= 0) { h.shares = 0; h.totalCost = 0; }
       }
     }
-    for (const d of state.dividends) {
+    for (const d of source.dividends) {
       if (!by[d.symbol]) continue;
       by[d.symbol].shares += (d.shares * (d.stock||0)) / 10;
     }
     return Object.values(by);
   }
 
+  function computeHoldings() {
+    return computeHoldingsFromData(state);
+  }
+
   function isExcludedSymbol(symbol) {
     return !!(state.excludedSymbols && state.excludedSymbols[String(symbol || '').trim()]);
+  }
+
+  function isExcludedSymbolInData(symbol, data) {
+    const excluded = data?.excludedSymbols || state.excludedSymbols || {};
+    return !!excluded[String(symbol || '').trim()];
   }
 
   function activeHoldings() {
@@ -2541,7 +2556,10 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   }
 
   function syncHealthCounts(data) {
+    const holdings = computeHoldingsFromData(data)
+      .filter(h => h.shares > 0 && !isExcludedSymbolInData(h.symbol, data));
     return {
+      holdings: holdings.length,
       trades: (data?.trades || []).length,
       dividends: (data?.dividends || []).length,
       snapshots: (data?.snapshots || []).length
@@ -2593,7 +2611,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     if (cloudResult.status === 'fulfilled') {
       const cloudData = cloudResult.value;
       const cloud = syncHealthCounts(cloudData);
-      cloudMatches = local.trades === cloud.trades &&
+      cloudMatches = local.holdings === cloud.holdings &&
+        local.trades === cloud.trades &&
         local.dividends === cloud.dividends && local.snapshots === cloud.snapshots;
       const cloudEl = $('sync-health-cloud');
       cloudEl.textContent = `交易 ${cloud.trades}｜股利 ${cloud.dividends}｜快照 ${cloud.snapshots}`;
