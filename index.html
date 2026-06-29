@@ -285,6 +285,12 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
 .action-badge.price { color: var(--text-muted); background: rgba(148,163,184,0.10); }
 .action-reason { color: var(--text-muted); font-size: 12px; line-height: 1.55; }
 .action-cell { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.decision-score { display: inline-flex; align-items: center; justify-content: center; min-width: 52px; border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 900; border: 1px solid var(--border); white-space: nowrap; }
+.decision-score.good { color: var(--down); background: rgba(34,197,94,0.10); border-color: rgba(34,197,94,0.30); }
+.decision-score.mid { color: var(--warn); background: rgba(251,191,36,0.10); border-color: rgba(251,191,36,0.28); }
+.decision-score.bad { color: var(--up); background: rgba(248,81,73,0.10); border-color: rgba(248,81,73,0.28); }
+.decision-score.na { color: var(--text-muted); background: rgba(148,163,184,0.10); }
+.decision-stack { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
 .health-tile { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; min-height: 92px; }
 .health-tile.ok { border-color: rgba(34,197,94,0.28); background: rgba(34,197,94,0.07); }
@@ -298,6 +304,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   .forecast-item .right { text-align: left; }
   .action-item { grid-template-columns: 1fr; }
   .action-cell { align-items: flex-start; }
+  .decision-stack { align-items: flex-start; }
 }
 
 </style>
@@ -449,6 +456,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
             <th class="right">現價</th><th class="right">市值</th>
             <th class="right">損益</th><th class="right">報酬率</th>
             <th class="right">建議</th>
+            <th class="right">決策分數</th>
             <th></th>
           </tr></thead>
           <tbody id="holdings-tbody"></tbody>
@@ -1520,7 +1528,9 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       const plPct = h.totalCost > 0 ? (pl/h.totalCost)*100 : 0;
       const dividends = sumDividendForSymbol(h.symbol);
       const totalProfit = pl + h.realized + dividends;
-      const action = evaluateHoldingAction({ ...h, price, mv, unrealized: pl, dividends, totalProfit, totalReturn: h.totalCost > 0 ? (totalProfit / h.totalCost) * 100 : 0, weight: totalMv > 0 ? (mv / totalMv) * 100 : 0 });
+      const actionInput = { ...h, price, mv, unrealized: pl, dividends, totalProfit, totalReturn: h.totalCost > 0 ? (totalProfit / h.totalCost) * 100 : 0, weight: totalMv > 0 ? (mv / totalMv) * 100 : 0 };
+      const action = evaluateHoldingAction(actionInput);
+      const decision = evaluateHoldingScore(actionInput, action);
       const ts = state.priceUpdated[h.symbol];
       const isStale = ts && (Date.now() - ts) > 7 * 86400 * 1000;
       let priceCell;
@@ -1543,6 +1553,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         <td class="right ${plClass(pl)}">${fmt(pl)}</td>
         <td class="right ${plClass(pl)}">${fmtPct(plPct)}</td>
         <td class="right"><span class="action-cell"><span class="action-badge ${action.className}">${action.label}</span><span class="dim" style="font-size:10px;">${action.shortReason}</span></span></td>
+        <td class="right"><span class="decision-stack"><span class="decision-score ${decision.className}">${decision.label}</span><span class="dim" style="font-size:10px;">${decision.shortReason}</span></span></td>
         <td class="right"><button class="btn btn-sm btn-ghost set-price" data-symbol="${h.symbol}">手動</button></td>
       </tr>`;
     }).join('');
@@ -2176,10 +2187,98 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     return { label, className, priority, reasons, shortReason };
   }
 
+  function evaluateHoldingScore(h, action = null) {
+    const priceAge = priceAgeDays(h.symbol);
+    const unrealizedPct = h.totalCost > 0 ? (h.unrealized / h.totalCost) * 100 : 0;
+    const reasons = [];
+
+    if (!h.price || h.price <= 0) {
+      return {
+        score: null,
+        label: '--',
+        className: 'na',
+        reasons: ['缺少有效報價，暫時不能評分'],
+        shortReason: '缺報價'
+      };
+    }
+
+    let score = 50;
+
+    if (priceAge !== null && priceAge >= 7) {
+      score -= 18;
+      reasons.push(`報價已 ${priceAge} 天未更新`);
+    } else if (priceAge !== null && priceAge >= 3) {
+      score -= 8;
+      reasons.push(`報價 ${priceAge} 天未更新`);
+    } else {
+      score += 6;
+      reasons.push('報價仍新鮮');
+    }
+
+    if (h.totalReturn >= 20) {
+      score += 18;
+      reasons.push(`含息報酬 ${fmtPct(h.totalReturn)} 強勢`);
+    } else if (h.totalReturn >= 8) {
+      score += 10;
+      reasons.push(`含息報酬 ${fmtPct(h.totalReturn)} 穩定`);
+    } else if (h.totalReturn <= -18) {
+      score -= 24;
+      reasons.push(`含息報酬 ${fmtPct(h.totalReturn)} 需控風險`);
+    } else if (h.totalReturn <= -8) {
+      score -= 14;
+      reasons.push(`含息報酬 ${fmtPct(h.totalReturn)} 偏弱`);
+    } else {
+      reasons.push(`含息報酬 ${fmtPct(h.totalReturn)} 中性`);
+    }
+
+    if (unrealizedPct <= -15) {
+      score -= 16;
+      reasons.push(`未實現損益 ${fmtPct(unrealizedPct)} 接近停損檢查區`);
+    } else if (unrealizedPct <= -8) {
+      score -= 8;
+      reasons.push(`未實現損益 ${fmtPct(unrealizedPct)} 需觀察`);
+    } else if (unrealizedPct >= 12) {
+      score += 8;
+      reasons.push(`未實現損益 ${fmtPct(unrealizedPct)} 有安全墊`);
+    }
+
+    if (h.weight >= 25) {
+      score -= 18;
+      reasons.push(`部位 ${fmtPct(h.weight)} 過度集中`);
+    } else if (h.weight >= 18) {
+      score -= 8;
+      reasons.push(`部位 ${fmtPct(h.weight)} 偏高`);
+    } else if (h.weight >= 4 && h.weight <= 14) {
+      score += 7;
+      reasons.push(`部位 ${fmtPct(h.weight)} 較均衡`);
+    } else if (h.weight < 2) {
+      score -= 3;
+      reasons.push(`部位 ${fmtPct(h.weight)} 太小，影響有限`);
+    }
+
+    if ((h.dividends || 0) > 0) {
+      score += 4;
+      reasons.push('已有股利現金流');
+    }
+
+    if (action?.className === 'stop') score = Math.min(score, 45);
+    if (action?.className === 'reduce') score = Math.min(score, 58);
+    if (action?.className === 'price') score = Math.min(score, 35);
+
+    score = Math.max(0, Math.min(100, Math.round(score)));
+    const className = score >= 70 ? 'good' : score >= 50 ? 'mid' : 'bad';
+    const label = `${score}`;
+    const shortReason = score >= 70 ? '品質較好' : score >= 50 ? '需追蹤' : '優先檢查';
+    return { score, label, className, reasons: reasons.slice(0, 4), shortReason };
+  }
+
   function actionRadarRows() {
     return evaluatedHoldings()
       .filter(h => h.shares > 0)
-      .map(h => ({ ...h, action: evaluateHoldingAction(h) }))
+      .map(h => {
+        const action = evaluateHoldingAction(h);
+        return { ...h, action, decision: evaluateHoldingScore(h, action) };
+      })
       .sort((a, b) => b.action.priority - a.action.priority || Math.abs(b.totalProfit) - Math.abs(a.totalProfit));
   }
 
@@ -2200,8 +2299,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
           <div class="action-name">${h.symbol} ${h.name || lookupName(h.symbol) || ''}</div>
           <div class="action-meta">比重 ${fmtPct(h.weight)}｜含息 ${fmtPct(h.totalReturn)}</div>
         </div>
-        <div><span class="action-badge ${h.action.className}">${h.action.label}</span></div>
-        <div class="action-reason">${h.action.reasons.join('；')}。市值 ${fmt(h.mv)}，含息損益 ${fmt(h.totalProfit)}。</div>
+        <div class="decision-stack"><span class="action-badge ${h.action.className}">${h.action.label}</span><span class="decision-score ${h.decision.className}">${h.decision.label}</span></div>
+        <div class="action-reason">${h.action.reasons.join('；')}。決策分數：${h.decision.label}（${h.decision.reasons.join('；')}）。市值 ${fmt(h.mv)}，含息損益 ${fmt(h.totalProfit)}。</div>
       </div>
     `).join('');
   }
@@ -2210,7 +2309,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     const rows = actionRadarRows().slice(0, 8);
     if (!rows.length) return '目前沒有可分析持股。';
     return ['持股行動雷達 ' + todayStr(), ...rows.map((h, i) =>
-      `${i + 1}. ${h.symbol} ${h.name || lookupName(h.symbol) || ''}｜${h.action.label}｜比重 ${fmtPct(h.weight)}｜含息 ${fmtPct(h.totalReturn)}｜${h.action.reasons.join('；')}`
+      `${i + 1}. ${h.symbol} ${h.name || lookupName(h.symbol) || ''}｜${h.action.label}｜分數 ${h.decision.label}｜比重 ${fmtPct(h.weight)}｜含息 ${fmtPct(h.totalReturn)}｜${h.action.reasons.join('；')}｜${h.decision.reasons.join('；')}`
     )].join('\n');
   }
 
@@ -2366,7 +2465,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     const actions = actionRadarRows().slice(0, 5);
     if (actions.length) {
       lines.push('行動雷達：');
-      actions.forEach(h => lines.push(`${h.symbol} ${h.name || ''}：${h.action.label}，${h.action.reasons[0] || '持續觀察'}`));
+      actions.forEach(h => lines.push(`${h.symbol} ${h.name || ''}：${h.action.label}，分數 ${h.decision.label}，${h.action.reasons[0] || '持續觀察'}`));
     }
     return lines.join('\n');
   }
@@ -2385,6 +2484,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         name: h.name,
         action: h.action.label,
         reasons: h.action.reasons,
+        decisionScore: h.decision.score,
+        decisionReasons: h.decision.reasons,
         weight: h.weight,
         totalReturn: h.totalReturn
       }))
