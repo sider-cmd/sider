@@ -104,6 +104,7 @@ header {
   margin-bottom: 12px;
 }
 .card-title { font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+.card-subtitle { font-size: 13px; font-weight: 800; color: var(--text); margin: 12px 0 8px; }
 .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 8px; flex-wrap: wrap; }
 
 .kpis { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 16px; }
@@ -536,6 +537,24 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         <div class="kpi"><div class="kpi-label">90 天預估</div><div class="kpi-value" id="forecast-90">$0</div></div>
         <div class="kpi"><div class="kpi-label">365 天預估</div><div class="kpi-value" id="forecast-365">$0</div></div>
       </div>
+      <div class="kpis">
+        <div class="kpi"><div class="kpi-label">今年已入帳</div><div class="kpi-value" id="dividend-year-received">$0</div></div>
+        <div class="kpi"><div class="kpi-label">今年預估總額</div><div class="kpi-value" id="dividend-year-projected">$0</div></div>
+        <div class="kpi"><div class="kpi-label">年度目標達成率</div><div class="kpi-value" id="dividend-goal-rate">0%</div></div>
+      </div>
+      <div class="form-grid" style="margin-top:10px;">
+        <div class="field"><label>年度股利目標</label><input type="number" id="dividend-goal-input" min="0" step="1000" placeholder="例如 60000"></div>
+        <div class="field"><label>今年剩餘預估</label><input type="text" id="dividend-year-remaining" readonly></div>
+      </div>
+      <div class="card-subtitle" style="margin-top:14px;">已公告 / 已登錄未來股利</div>
+      <div id="announced-dividend-empty" class="empty">目前沒有已登錄的未來股利</div>
+      <div class="forecast-list" id="announced-dividend-list" style="display:none;"></div>
+      <div class="card-subtitle" style="margin-top:14px;">推估月份總表</div>
+      <div id="forecast-month-empty" class="empty">目前沒有可推估的月份資料</div>
+      <div class="forecast-list" id="forecast-month-list" style="display:none;"></div>
+      <div class="card-subtitle" style="margin-top:14px;">除息後成本回補分析</div>
+      <div id="dividend-recovery-empty" class="empty">目前沒有可分析的持股股利資料</div>
+      <div class="forecast-list" id="dividend-recovery-list" style="display:none;"></div>
       <div id="forecast-empty" class="empty">目前沒有足夠的歷史股利可估算</div>
       <div class="forecast-list" id="forecast-list" style="display:none;"></div>
     </div>
@@ -2433,15 +2452,173 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     $('insight-risk-list').innerHTML = riskRows.map(([label, value]) => `<div class="risk-row"><span class="muted">${label}</span><strong>${value}</strong></div>`).join('');
   }
 
+  function dividendGoalValue() {
+    const raw = localStorage.getItem('twPortfolioDividendGoal');
+    const value = Number(raw || 0);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
+
+  function setDividendGoalValue(value) {
+    const n = Number(value || 0);
+    if (Number.isFinite(n) && n > 0) localStorage.setItem('twPortfolioDividendGoal', String(Math.round(n)));
+    else localStorage.removeItem('twPortfolioDividendGoal');
+  }
+
+  function dividendNetAmount(d) {
+    return (Number(d.shares) || 0) * (Number(d.cash) || 0) - (Number(d.fee) || 0) - (Number(d.nhi) || 0);
+  }
+
+  function announcedFutureDividendRows() {
+    const today = todayStr();
+    return state.dividends
+      .filter(d => d.date > today && !isExcludedSymbol(d.symbol))
+      .map(d => ({
+        date: d.date,
+        symbol: d.symbol,
+        name: displayStockName(d.symbol, d.name),
+        shares: Number(d.shares) || 0,
+        cash: Number(d.cash) || 0,
+        amount: dividendNetAmount(d),
+        source: 'announced'
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  function groupForecastByMonth(rows) {
+    const groups = new Map();
+    rows.forEach(row => {
+      const month = row.date.slice(0, 7);
+      if (!groups.has(month)) groups.set(month, { month, amount: 0, count: 0, items: [] });
+      const group = groups.get(month);
+      group.amount += row.amount;
+      group.count += 1;
+      group.items.push(row);
+    });
+    return [...groups.values()].sort((a, b) => a.month.localeCompare(b.month));
+  }
+
+  function currentYearDividendActual(year) {
+    const today = todayStr();
+    return state.dividends
+      .filter(d => String(d.date || '').startsWith(String(year)) && d.date <= today && !isExcludedSymbol(d.symbol))
+      .reduce((sum, d) => sum + dividendNetAmount(d), 0);
+  }
+
+  function dividendRecoveryRows() {
+    return enrichedHoldings()
+      .filter(h => h.shares > 0 && h.price > 0)
+      .map(h => {
+        const dividends = state.dividends.filter(d => d.symbol === h.symbol && !isExcludedSymbol(d.symbol));
+        const dividendNet = dividends.reduce((sum, d) => sum + dividendNetAmount(d), 0);
+        const dividendPerShare = h.shares > 0 ? dividendNet / h.shares : 0;
+        const avgCost = h.shares > 0 ? h.totalCost / h.shares : 0;
+        const recoveryPrice = Math.max(0, avgCost - dividendPerShare);
+        const gap = h.price - recoveryPrice;
+        const recovered = gap >= 0;
+        return {
+          ...h,
+          avgCost,
+          dividendNet,
+          dividendPerShare,
+          recoveryPrice,
+          gap,
+          recovered,
+          recoveryAmount: gap * h.shares,
+          dividendCount: dividends.length
+        };
+      })
+      .filter(row => row.dividendCount > 0)
+      .sort((a, b) => a.gap - b.gap);
+  }
+
   function renderDividendForecast() {
     if (!$('forecast-list')) return;
     const rows = buildDividendForecast(365);
+    const announcedRows = announcedFutureDividendRows();
+    const year = new Date(todayStr() + 'T00:00:00+08:00').getFullYear();
+    const yearActual = currentYearDividendActual(year);
+    const yearRemaining = rows.filter(r => r.date.startsWith(String(year))).reduce((s, r) => s + r.amount, 0);
+    const yearProjected = yearActual + yearRemaining;
+    const goal = dividendGoalValue();
+
     setMoney('forecast-30', rows.filter(r => daysFromToday(r.date) <= 30).reduce((s, r) => s + r.amount, 0));
     setMoney('forecast-90', rows.filter(r => daysFromToday(r.date) <= 90).reduce((s, r) => s + r.amount, 0));
     setMoney('forecast-365', rows.reduce((s, r) => s + r.amount, 0));
+    setMoney('dividend-year-received', yearActual);
+    setMoney('dividend-year-projected', yearProjected);
+    $('dividend-year-remaining').value = fmt(yearRemaining);
+    const goalInput = $('dividend-goal-input');
+    if (goalInput && document.activeElement !== goalInput) goalInput.value = goal || '';
+    $('dividend-goal-rate').textContent = goal > 0 ? fmtPct((yearProjected / goal) * 100) : '未設定';
+    $('dividend-goal-rate').className = 'kpi-value ' + (goal > 0 && yearProjected >= goal ? 'up' : goal > 0 ? 'down' : '');
+
+    if (announcedRows.length === 0) {
+      $('announced-dividend-empty').style.display = 'block';
+      $('announced-dividend-list').style.display = 'none';
+      $('announced-dividend-list').innerHTML = '';
+    } else {
+      $('announced-dividend-empty').style.display = 'none';
+      $('announced-dividend-list').style.display = 'grid';
+      $('announced-dividend-list').innerHTML = announcedRows.slice(0, 10).map(r => `
+        <div class="forecast-item">
+          <div class="forecast-date">${r.date}</div>
+          <div>
+            <div class="forecast-symbol">${r.symbol} ${r.name}</div>
+            <div class="forecast-meta">${fmtNum(r.shares)} 股 × 每股 ${fmtNum(r.cash, 4)}<span class="forecast-confidence good">已公告</span></div>
+          </div>
+          <div class="right up"><strong>${fmt(r.amount)}</strong></div>
+        </div>
+      `).join('');
+    }
+
+    const monthGroups = groupForecastByMonth(rows);
+    if (monthGroups.length === 0) {
+      $('forecast-month-empty').style.display = 'block';
+      $('forecast-month-list').style.display = 'none';
+      $('forecast-month-list').innerHTML = '';
+    } else {
+      $('forecast-month-empty').style.display = 'none';
+      $('forecast-month-list').style.display = 'grid';
+      $('forecast-month-list').innerHTML = monthGroups.slice(0, 12).map(group => {
+        const detail = group.items.slice(0, 4).map(item => `${item.symbol} ${displayStockName(item.symbol, item.name)} ${fmt(item.amount)}`).join('、');
+        const more = group.items.length > 4 ? `，另 ${group.items.length - 4} 筆` : '';
+        return `
+          <div class="forecast-item">
+            <div class="forecast-date">${group.month}</div>
+            <div>
+              <div class="forecast-symbol">${group.count} 筆推估股利</div>
+              <div class="forecast-meta">${detail}${more}</div>
+            </div>
+            <div class="right up"><strong>${fmt(group.amount)}</strong></div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    const recoveryRows = dividendRecoveryRows();
+    if (recoveryRows.length === 0) {
+      $('dividend-recovery-empty').style.display = 'block';
+      $('dividend-recovery-list').style.display = 'none';
+      $('dividend-recovery-list').innerHTML = '';
+    } else {
+      $('dividend-recovery-empty').style.display = 'none';
+      $('dividend-recovery-list').style.display = 'grid';
+      $('dividend-recovery-list').innerHTML = recoveryRows.slice(0, 10).map(row => `
+        <div class="forecast-item">
+          <div class="forecast-date">${row.symbol}</div>
+          <div>
+            <div class="forecast-symbol">${displayStockName(row.symbol, row.name)} <span class="forecast-confidence ${row.recovered ? 'good' : 'bad'}">${row.recovered ? '已回補' : '待回補'}</span></div>
+            <div class="forecast-meta">均價 ${fmtNum(row.avgCost, 2)}｜累積股利/股 ${fmtNum(row.dividendPerShare, 2)}｜回補價 ${fmtNum(row.recoveryPrice, 2)}｜現價 ${fmtNum(row.price, 2)}</div>
+          </div>
+          <div class="right ${row.recovered ? 'up' : 'down'}"><strong>${fmt(row.recoveryAmount)}</strong></div>
+        </div>
+      `).join('');
+    }
+
     if (rows.length === 0) {
       $('forecast-empty').style.display = 'block';
       $('forecast-list').style.display = 'none';
+      $('forecast-list').innerHTML = '';
       return;
     }
     $('forecast-empty').style.display = 'none';
@@ -3247,6 +3424,10 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     await pushWebStateToLine();
   });
   $('export-forecast-btn')?.addEventListener('click', exportForecastCsv);
+  $('dividend-goal-input')?.addEventListener('input', () => {
+    setDividendGoalValue($('dividend-goal-input').value);
+    renderDividendForecast();
+  });
 
   $('export-monthly-pnl-btn').addEventListener('click', exportMonthlyPnlCsv);
 
