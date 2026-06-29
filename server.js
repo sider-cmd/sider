@@ -2195,29 +2195,41 @@ ${simpleRank(dispersed, (item) => formatShareholdingPercent(item.summary.retailP
 提醒：這是週資料，適合看籌碼結構，不是盤中即時買賣訊號。`);
 };
 
-const classifyDailyChipMovement = (chip, holder) => {
+const isEtfSymbol = (code) => /^00\d+/.test(String(code || ""));
+
+const classifyDailyChipMovement = (code, chip, holder) => {
   let score = 0;
   const reasons = [];
+  const isEtf = isEtfSymbol(code);
 
   if (chip?.available) {
-    if (chip.foreign > 0) {
+    if (isEtf) {
+      if (chip.total > 0) {
+        score += 1;
+        reasons.push("ETF 法人資金流入");
+      } else if (chip.total < 0) {
+        score -= 1;
+        reasons.push("ETF 法人資金流出");
+      }
+      reasons.push("ETF 不用一般個股籌碼規則硬判買賣");
+    } else if (chip.foreign > 0) {
       score += 2;
       reasons.push("外資買超");
     } else if (chip.foreign < 0) {
       score -= 2;
       reasons.push("外資賣超");
     }
-    if (chip.trust > 0) {
+    if (!isEtf && chip.trust > 0) {
       score += 1;
       reasons.push("投信買超");
-    } else if (chip.trust < 0) {
+    } else if (!isEtf && chip.trust < 0) {
       score -= 1;
       reasons.push("投信賣超");
     }
-    if (chip.total > 0) {
+    if (!isEtf && chip.total > 0) {
       score += 1;
       reasons.push("三大法人合計買超");
-    } else if (chip.total < 0) {
+    } else if (!isEtf && chip.total < 0) {
       score -= 1;
       reasons.push("三大法人合計賣超");
     }
@@ -2225,7 +2237,9 @@ const classifyDailyChipMovement = (chip, holder) => {
     reasons.push("法人日資料不足");
   }
 
-  if (holder) {
+  if (holder && isEtf) {
+    reasons.push("ETF 集保級距只作持有人結構參考");
+  } else if (holder) {
     if (holder.bigPercent >= 55) {
       score += 2;
       reasons.push("400 張以上大戶占比高");
@@ -2279,7 +2293,7 @@ const buildDailyChipMovementReport = async (ownerKey) => {
     entries.map(async ([code]) => {
       const chip = await fetchInstitutionalChipSummary(code);
       const holder = summarizeShareholdingRows(tdcc.rowsByCode.get(code));
-      const movement = classifyDailyChipMovement(chip, holder);
+      const movement = classifyDailyChipMovement(code, chip, holder);
       return {
         code,
         name: dailyName(code),
