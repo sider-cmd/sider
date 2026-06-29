@@ -42,6 +42,7 @@ const intradayAnomalyPushLog = new Map();
 const intradayAnomalySettings = new Map();
 const dailyReportPushLog = new Set();
 const dailyReportSettings = new Map();
+const dailyChipMovementPushLog = new Set();
 const linePushCooldownLog = new Map();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
@@ -176,6 +177,12 @@ const DAILY_REPORT_TIMES = (process.env.DAILY_REPORT_TIMES || "14:35")
   .filter(Boolean);
 const DAILY_REPORT_ENABLED = process.env.DAILY_REPORT_ENABLED !== "false";
 const DAILY_REPORT_MODE = (process.env.DAILY_REPORT_MODE || "compact").toLowerCase();
+const DAILY_CHIP_MOVEMENT_TIMES = (process.env.DAILY_CHIP_MOVEMENT_TIMES || "15:10")
+  .split(",")
+  .map((time) => time.trim())
+  .filter(Boolean);
+const DAILY_CHIP_MOVEMENT_ENABLED =
+  process.env.DAILY_CHIP_MOVEMENT_ENABLED !== "false";
 const LINE_SCHEDULED_PUSH_MIN_GAP_MS =
   Number(process.env.LINE_SCHEDULED_PUSH_MIN_GAP_MS) || 60 * 60 * 1000;
 const LINE_ALERT_PUSH_MIN_GAP_MS =
@@ -2188,6 +2195,196 @@ ${simpleRank(dispersed, (item) => formatShareholdingPercent(item.summary.retailP
 提醒：這是週資料，適合看籌碼結構，不是盤中即時買賣訊號。`);
 };
 
+const classifyDailyChipMovement = (chip, holder) => {
+  let score = 0;
+  const reasons = [];
+
+  if (chip?.available) {
+    if (chip.foreign > 0) {
+      score += 2;
+      reasons.push("外資買超");
+    } else if (chip.foreign < 0) {
+      score -= 2;
+      reasons.push("外資賣超");
+    }
+    if (chip.trust > 0) {
+      score += 1;
+      reasons.push("投信買超");
+    } else if (chip.trust < 0) {
+      score -= 1;
+      reasons.push("投信賣超");
+    }
+    if (chip.total > 0) {
+      score += 1;
+      reasons.push("三大法人合計買超");
+    } else if (chip.total < 0) {
+      score -= 1;
+      reasons.push("三大法人合計賣超");
+    }
+  } else {
+    reasons.push("法人日資料不足");
+  }
+
+  if (holder) {
+    if (holder.bigPercent >= 55) {
+      score += 2;
+      reasons.push("400 張以上大戶占比高");
+    } else if (holder.bigPercent >= 45) {
+      score += 1;
+      reasons.push("大戶結構尚穩");
+    }
+    if (holder.retailPercent >= 35 && holder.bigPercent < 45) {
+      score -= 2;
+      reasons.push("散戶占比偏高");
+    }
+    if (holder.megaPercent >= 30) {
+      score += 1;
+      reasons.push("千張大戶占比偏高");
+    }
+  } else {
+    reasons.push("TDCC 大戶週資料不足");
+  }
+
+  const level =
+    score >= 4
+      ? "偏多"
+      : score >= 2
+        ? "中性偏多"
+        : score <= -3
+          ? "偏空"
+          : score <= -1
+            ? "中性偏弱"
+            : "觀察";
+
+  return {
+    score,
+    level,
+    reasons: reasons.length ? reasons : ["籌碼未見明顯方向"]
+  };
+};
+
+const buildDailyChipMovementReport = async (ownerKey) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const entries = analysisEntries([...portfolio.entries()]);
+  if (entries.length === 0) {
+    return "每日持股籌碼動向\n\n目前沒有可分析的持股資料。請先同步網頁資產表到 LINE。";
+  }
+
+  const tdcc = await getTdccShareholdingRowsByCode().catch((error) => {
+    console.error("TDCC shareholding fetch failed for daily chip movement:", error.message);
+    return { rowsByCode: new Map(), sourceDate: null };
+  });
+
+  const analyses = await Promise.all(
+    entries.map(async ([code]) => {
+      const chip = await fetchInstitutionalChipSummary(code);
+      const holder = summarizeShareholdingRows(tdcc.rowsByCode.get(code));
+      const movement = classifyDailyChipMovement(chip, holder);
+      return {
+        code,
+        name: dailyName(code),
+        chip,
+        holder,
+        movement
+      };
+    })
+  );
+
+  const latestChipDate =
+    analyses.find((item) => item.chip?.available)?.chip.latestDate || "查無法人日期";
+  const latestHolderDate =
+    analyses.find((item) => item.holder)?.holder.date || tdcc.sourceDate || "查無集保日期";
+
+  const formatHolderLine = (holder) =>
+    holder
+      ? `大戶 ${formatShareholdingPercent(holder.bigPercent)}｜散戶 ${formatShareholdingPercent(holder.retailPercent)}`
+      : "大戶/散戶：查無 TDCC 週資料";
+
+  const formatChipLine = (chip) =>
+    chip?.available
+      ? `外資 ${signedLots(chip.foreign)}｜投信 ${signedLots(chip.trust)}｜自營 ${signedLots(chip.dealer)}｜合計 ${signedLots(chip.total)}`
+      : chip?.text || "法人：查無資料";
+
+  const formatRow = (item, index) => `${index + 1}. ${stockLabel(item.code, item.name)}：${item.movement.level}
+${formatChipLine(item.chip)}
+${formatHolderLine(item.holder)}
+判讀：${item.movement.reasons.slice(0, 4).join("、")}`;
+
+  const weakRows = analyses
+    .filter((item) => item.movement.score <= -1)
+    .sort((a, b) => a.movement.score - b.movement.score)
+    .slice(0, 5);
+  const strongRows = analyses
+    .filter((item) => item.movement.score >= 2)
+    .sort((a, b) => b.movement.score - a.movement.score)
+    .slice(0, 5);
+  const watchRows = analyses
+    .filter((item) => item.movement.score > -1 && item.movement.score < 2)
+    .sort((a, b) => Math.abs(b.chip?.total || 0) - Math.abs(a.chip?.total || 0))
+    .slice(0, 5);
+
+  const renderSection = (title, rows, emptyText) => `${title}
+${rows.length ? rows.map(formatRow).join("\n\n") : emptyText}`;
+
+  const summaryRows = analyses
+    .sort((a, b) => b.movement.score - a.movement.score)
+    .map((item) => `${stockLabel(item.code, item.name)} ${item.movement.level}(${item.movement.score})`)
+    .join("、");
+
+  return toLineSafeText(`📊 每日持股籌碼動向
+法人資料日：${latestChipDate}
+大戶資料日：${formatTdccDate(latestHolderDate)}
+
+${renderSection("⚠️ 籌碼偏弱", weakRows, "目前沒有明顯偏弱持股。")}
+
+${renderSection("✅ 籌碼偏強", strongRows, "目前沒有明顯偏強持股。")}
+
+${renderSection("👀 觀察名單", watchRows, "目前沒有中性觀察名單。")}
+
+全持股摘要
+${summaryRows}
+
+提醒：外資/投信/自營商是最新日資料，TDCC 大戶是最新週資料；這份報告用來看籌碼方向，不是保證買賣建議。`);
+};
+
+const checkAndPushDailyChipMovementReports = async (force = false, onlyOwnerKey = null) => {
+  if (!hasPortfolioDb || (!DAILY_CHIP_MOVEMENT_ENABLED && !force)) {
+    return [];
+  }
+
+  const now = getTaipeiNow();
+  if (!force && (now.weekday === "Sat" || now.weekday === "Sun")) {
+    return [];
+  }
+  if (!force && !DAILY_CHIP_MOVEMENT_TIMES.includes(now.timeKey)) {
+    return [];
+  }
+
+  const ownerKeys = onlyOwnerKey ? [onlyOwnerKey] : await getPortfolioOwnerKeys();
+  const results = [];
+  for (const ownerKey of ownerKeys) {
+    const pushKey = `${now.dateKey}|${now.timeKey}|daily-chip-movement|${ownerKey}`;
+    if (!force && dailyChipMovementPushLog.has(pushKey)) {
+      continue;
+    }
+    if (shouldSkipLinePush(ownerKey, "daily-chip-movement", LINE_SCHEDULED_PUSH_MIN_GAP_MS, force)) {
+      results.push({ ownerKey, pushed: false, skipped: "cooldown" });
+      continue;
+    }
+
+    const text = await buildDailyChipMovementReport(ownerKey);
+    await client.pushMessage(ownerKey, {
+      type: "text",
+      text
+    });
+    markLinePush(ownerKey, "daily-chip-movement");
+    dailyChipMovementPushLog.add(pushKey);
+    results.push({ ownerKey, pushed: true });
+  }
+
+  return results;
+};
+
 const fetchInstitutionalChipSummary = async (code) => {
   try {
     const response = await axios.get(
@@ -3323,6 +3520,39 @@ if (["大戶動向", "集保級距", "大戶週報", "集保週報"].includes(ma
     return client.replyMessage(event.replyToken, {
       type: "text",
       text: "大戶週報產生失敗，請稍後再試，或到 Railway Deploy Logs 查看 major holder weekly report failed 後面的錯誤。"
+    });
+  }
+}
+
+if (["每日籌碼", "每日籌碼動向", "每日大戶外資", "大戶外資動向", "持股籌碼"].includes(marketInput)) {
+  try {
+    const report = await buildDailyChipMovementReport(watchlistKey);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: report
+    });
+  } catch (error) {
+    console.error("daily chip movement report failed:", error);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "每日籌碼動向產生失敗，請稍後再試，或到 Railway Deploy Logs 查看 daily chip movement report failed 後面的錯誤。"
+    });
+  }
+}
+
+if (marketInput === "每日籌碼推送") {
+  try {
+    const results = await checkAndPushDailyChipMovementReports(true, watchlistKey);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `✅ 已嘗試推送每日籌碼動向
+推送筆數：${results.length}`
+    });
+  } catch (error) {
+    console.error("manual daily chip movement push failed:", error);
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: "每日籌碼動向推送失敗，請到 Railway Deploy Logs 查看 manual daily chip movement push failed 後面的錯誤。"
     });
   }
 }
@@ -7292,6 +7522,8 @@ const buildSystemDiagnostics = async () => {
         INTRADAY_ANOMALY_ENABLED && typeof checkAndPushIntradayAnomalies === "function",
       dailyReportEnabled: DAILY_REPORT_ENABLED,
       dailyReportTimes: DAILY_REPORT_TIMES,
+      dailyChipMovementEnabled: DAILY_CHIP_MOVEMENT_ENABLED,
+      dailyChipMovementTimes: DAILY_CHIP_MOVEMENT_TIMES,
       scheduledPushCooldownMinutes: Math.round(LINE_SCHEDULED_PUSH_MIN_GAP_MS / 60000),
       alertPushCooldownMinutes: Math.round(LINE_ALERT_PUSH_MIN_GAP_MS / 60000)
     },
@@ -7301,7 +7533,8 @@ const buildSystemDiagnostics = async () => {
       intradayDecisionAnalysis: typeof checkAndPushIntradayDecisionAnalysis === "function",
       intradayAnomalies: typeof checkAndPushIntradayAnomalies === "function",
       dailyReports: typeof checkAndPushDailyReports === "function",
-      majorHolderWeekly: typeof buildMajorHolderWeeklyReport === "function"
+      majorHolderWeekly: typeof buildMajorHolderWeeklyReport === "function",
+      dailyChipMovement: typeof buildDailyChipMovementReport === "function"
     },
     checks: {},
     warnings: []
@@ -7701,6 +7934,25 @@ app.get('/major-holders/check', requireConfiguredWebSyncToken, async (req, res) 
   }
 });
 
+app.get('/daily-chip/check', requireConfiguredWebSyncToken, async (req, res) => {
+  try {
+    const results = await checkAndPushDailyChipMovementReports(true);
+    res.json({
+      ok: true,
+      pushed: results.filter((item) => item.pushed).length,
+      attempted: results.length,
+      mode: "daily-chip-movement"
+    });
+  } catch (error) {
+    console.error("Manual daily chip movement check failed:", error);
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+      detail: error.response?.data || null
+    });
+  }
+});
+
 app.get('/daily-report/check', requireConfiguredWebSyncToken, async (req, res) => {
   try {
     const results = await checkAndPushDailyReports(true);
@@ -7816,6 +8068,20 @@ app.listen(PORT, '0.0.0.0', () => {
         console.error("Daily portfolio report schedule failed:", error);
       });
     }, DAILY_REPORT_INTERVAL_MS);
+    if (DAILY_CHIP_MOVEMENT_ENABLED && DAILY_CHIP_MOVEMENT_TIMES.length > 0) {
+      console.log(
+        `Daily chip movement scheduler enabled. Times: ${DAILY_CHIP_MOVEMENT_TIMES.join(
+          ", "
+        )}`
+      );
+      setInterval(() => {
+        checkAndPushDailyChipMovementReports().catch((error) => {
+          console.error("Daily chip movement schedule failed:", error);
+        });
+      }, DAILY_REPORT_INTERVAL_MS);
+    } else {
+      console.log("Daily chip movement scheduler disabled");
+    }
     setTimeout(() => {
       checkAndRepairWebCloudState()
         .then((result) => {
