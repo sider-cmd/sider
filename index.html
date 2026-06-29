@@ -273,9 +273,31 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
 .risk-list { display: grid; gap: 8px; }
 .risk-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .risk-row:last-child { border-bottom: none; }
+.action-radar { display: grid; gap: 8px; }
+.action-item { display: grid; grid-template-columns: minmax(110px, 150px) minmax(80px, 100px) 1fr; gap: 10px; align-items: start; padding: 10px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.action-name { color: var(--text); font-weight: 800; line-height: 1.35; }
+.action-meta { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+.action-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 74px; border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 800; border: 1px solid var(--border); white-space: nowrap; }
+.action-badge.hold { color: var(--down); background: rgba(34,197,94,0.10); border-color: rgba(34,197,94,0.30); }
+.action-badge.watch { color: var(--warn); background: rgba(251,191,36,0.10); border-color: rgba(251,191,36,0.28); }
+.action-badge.reduce, .action-badge.stop { color: var(--up); background: rgba(248,81,73,0.10); border-color: rgba(248,81,73,0.28); }
+.action-badge.add { color: var(--accent); background: rgba(91,158,255,0.10); border-color: rgba(91,158,255,0.28); }
+.action-badge.price { color: var(--text-muted); background: rgba(148,163,184,0.10); }
+.action-reason { color: var(--text-muted); font-size: 12px; line-height: 1.55; }
+.action-cell { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.health-tile { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; min-height: 92px; }
+.health-tile.ok { border-color: rgba(34,197,94,0.28); background: rgba(34,197,94,0.07); }
+.health-tile.warn { border-color: rgba(251,191,36,0.28); background: rgba(251,191,36,0.07); }
+.health-tile.bad { border-color: rgba(248,81,73,0.28); background: rgba(248,81,73,0.07); }
+.health-label { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+.health-value { font-size: 18px; font-weight: 800; color: var(--text); }
+.health-note { font-size: 12px; color: var(--text-muted); line-height: 1.55; margin-top: 6px; }
 @media (max-width: 640px) {
   .forecast-item { grid-template-columns: 1fr; gap: 4px; }
   .forecast-item .right { text-align: left; }
+  .action-item { grid-template-columns: 1fr; }
+  .action-cell { align-items: flex-start; }
 }
 
 </style>
@@ -349,6 +371,29 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
 
     <div class="card">
       <div class="card-header">
+        <div>
+          <div class="card-title">持股行動雷達</div>
+          <div class="muted" style="font-size:12px;margin-top:4px;">依含息報酬、單檔比重、報價新鮮度與成本風險自動排序</div>
+        </div>
+        <button class="btn btn-sm btn-ghost" id="copy-action-radar-btn">複製雷達</button>
+      </div>
+      <div id="action-radar-empty" class="empty">尚無可分析持股<div class="empty-hint">更新報價後會產生每檔行動提醒</div></div>
+      <div class="action-radar" id="action-radar-list"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">資料健康檢查</div>
+          <div class="muted" style="font-size:12px;margin-top:4px;">自動檢查同步、報價、快照與壞名稱，先抓小問題</div>
+        </div>
+        <button class="btn btn-sm btn-ghost" id="copy-data-health-btn">複製狀態</button>
+      </div>
+      <div class="health-grid" id="data-health-grid"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
         <div class="card-title">資產配置</div>
         <button class="btn btn-sm btn-ghost" id="refresh-prices-btn">↻ 更新報價</button>
       </div>
@@ -403,6 +448,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
             <th class="right">股數</th><th class="right">均價</th>
             <th class="right">現價</th><th class="right">市值</th>
             <th class="right">損益</th><th class="right">報酬率</th>
+            <th class="right">建議</th>
             <th></th>
           </tr></thead>
           <tbody id="holdings-tbody"></tbody>
@@ -1426,6 +1472,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     tr.className = 'kpi-value ' + plClass(k.totalReturn);
     renderAllocation(k.holdings);
     renderInsights();
+    renderActionRadar();
+    renderDataHealth();
   }
 
   function renderAllocation(holdings) {
@@ -1463,12 +1511,16 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     const hs = activeHoldings().filter(h => h.shares > 0);
     if (hs.length === 0) { $('holdings-empty').style.display = 'block'; $('holdings-wrap').style.display = 'none'; return; }
     $('holdings-empty').style.display = 'none'; $('holdings-wrap').style.display = 'block';
+    const totalMv = hs.reduce((sum, h) => sum + h.shares * (state.prices[h.symbol] || 0), 0);
     $('holdings-tbody').innerHTML = hs.map(h => {
       const price = state.prices[h.symbol] || 0;
       const mv = h.shares * price;
       const avg = h.shares > 0 ? h.totalCost/h.shares : 0;
       const pl = mv - h.totalCost;
       const plPct = h.totalCost > 0 ? (pl/h.totalCost)*100 : 0;
+      const dividends = sumDividendForSymbol(h.symbol);
+      const totalProfit = pl + h.realized + dividends;
+      const action = evaluateHoldingAction({ ...h, price, mv, unrealized: pl, dividends, totalProfit, totalReturn: h.totalCost > 0 ? (totalProfit / h.totalCost) * 100 : 0, weight: totalMv > 0 ? (mv / totalMv) * 100 : 0 });
       const ts = state.priceUpdated[h.symbol];
       const isStale = ts && (Date.now() - ts) > 7 * 86400 * 1000;
       let priceCell;
@@ -1490,6 +1542,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         <td class="right">${fmt(mv)}</td>
         <td class="right ${plClass(pl)}">${fmt(pl)}</td>
         <td class="right ${plClass(pl)}">${fmtPct(plPct)}</td>
+        <td class="right"><span class="action-cell"><span class="action-badge ${action.className}">${action.label}</span><span class="dim" style="font-size:10px;">${action.shortReason}</span></span></td>
         <td class="right"><button class="btn btn-sm btn-ghost set-price" data-symbol="${h.symbol}">手動</button></td>
       </tr>`;
     }).join('');
@@ -2051,6 +2104,185 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     return buildDividendForecast(days).reduce((sum, row) => sum + row.amount, 0);
   }
 
+  function priceAgeDays(symbol) {
+    const ts = state.priceUpdated?.[symbol];
+    if (!ts) return null;
+    return Math.max(0, Math.floor((Date.now() - Number(ts)) / 86400000));
+  }
+
+  function evaluateHoldingAction(h) {
+    const priceAge = priceAgeDays(h.symbol);
+    const unrealizedPct = h.totalCost > 0 ? (h.unrealized / h.totalCost) * 100 : 0;
+    const reasons = [];
+    let label = '續抱';
+    let className = 'hold';
+    let priority = 20;
+
+    if (!h.price || h.price <= 0) {
+      label = '報價待補';
+      className = 'price';
+      priority = 95;
+      reasons.push('缺少現價，先補報價再判斷');
+    } else if (priceAge !== null && priceAge >= 7) {
+      label = '觀察';
+      className = 'watch';
+      priority = Math.max(priority, 70);
+      reasons.push(`報價已 ${priceAge} 天未更新`);
+    }
+
+    if (h.weight >= 25) {
+      label = label === '停損檢視' ? label : '減碼檢視';
+      className = label === '停損檢視' ? className : 'reduce';
+      priority = Math.max(priority, 86);
+      reasons.push(`單檔比重 ${fmtPct(h.weight)} 偏高`);
+    } else if (h.weight >= 18) {
+      if (priority < 70) {
+        label = '觀察';
+        className = 'watch';
+        priority = 70;
+      }
+      reasons.push(`單檔比重 ${fmtPct(h.weight)} 需控管`);
+    }
+
+    if (h.totalReturn <= -18 || unrealizedPct <= -15) {
+      label = '停損檢視';
+      className = 'stop';
+      priority = 92;
+      reasons.push(`含息報酬 ${fmtPct(h.totalReturn)}，未實現 ${fmtPct(unrealizedPct)}`);
+    } else if (h.totalReturn <= -8 || unrealizedPct <= -10) {
+      if (label !== '停損檢視') {
+        label = '減碼檢視';
+        className = 'reduce';
+        priority = Math.max(priority, 82);
+      }
+      reasons.push(`跌幅已進入風險檢查區，未實現 ${fmtPct(unrealizedPct)}`);
+    } else if (h.totalReturn >= 12 && h.weight <= 10 && (!priceAge || priceAge <= 2)) {
+      if (priority < 60) {
+        label = '可加碼觀察';
+        className = 'add';
+        priority = 55;
+      }
+      reasons.push(`含息報酬 ${fmtPct(h.totalReturn)}，比重 ${fmtPct(h.weight)} 尚低`);
+    } else if (h.totalReturn >= 5 && h.weight < 18) {
+      reasons.push(`含息報酬 ${fmtPct(h.totalReturn)}，部位未過度集中`);
+    } else if (reasons.length === 0) {
+      label = '觀察';
+      className = 'watch';
+      priority = 45;
+      reasons.push(`含息報酬 ${fmtPct(h.totalReturn)}，暫無明確優勢或風險`);
+    }
+
+    const shortReason = reasons[0] || `含息 ${fmtPct(h.totalReturn)}`;
+    return { label, className, priority, reasons, shortReason };
+  }
+
+  function actionRadarRows() {
+    return evaluatedHoldings()
+      .filter(h => h.shares > 0)
+      .map(h => ({ ...h, action: evaluateHoldingAction(h) }))
+      .sort((a, b) => b.action.priority - a.action.priority || Math.abs(b.totalProfit) - Math.abs(a.totalProfit));
+  }
+
+  function renderActionRadar() {
+    const list = $('action-radar-list');
+    const empty = $('action-radar-empty');
+    if (!list || !empty) return;
+    const rows = actionRadarRows();
+    if (!rows.length) {
+      empty.style.display = 'block';
+      list.innerHTML = '';
+      return;
+    }
+    empty.style.display = 'none';
+    list.innerHTML = rows.slice(0, 8).map(h => `
+      <div class="action-item">
+        <div>
+          <div class="action-name">${h.symbol} ${h.name || lookupName(h.symbol) || ''}</div>
+          <div class="action-meta">比重 ${fmtPct(h.weight)}｜含息 ${fmtPct(h.totalReturn)}</div>
+        </div>
+        <div><span class="action-badge ${h.action.className}">${h.action.label}</span></div>
+        <div class="action-reason">${h.action.reasons.join('；')}。市值 ${fmt(h.mv)}，含息損益 ${fmt(h.totalProfit)}。</div>
+      </div>
+    `).join('');
+  }
+
+  function buildActionRadarText() {
+    const rows = actionRadarRows().slice(0, 8);
+    if (!rows.length) return '目前沒有可分析持股。';
+    return ['持股行動雷達 ' + todayStr(), ...rows.map((h, i) =>
+      `${i + 1}. ${h.symbol} ${h.name || lookupName(h.symbol) || ''}｜${h.action.label}｜比重 ${fmtPct(h.weight)}｜含息 ${fmtPct(h.totalReturn)}｜${h.action.reasons.join('；')}`
+    )].join('\n');
+  }
+
+  function daysSinceDate(dateText) {
+    if (!dateText) return null;
+    const time = new Date(String(dateText) + 'T00:00:00+08:00').getTime();
+    if (!Number.isFinite(time)) return null;
+    const today = new Date(todayStr() + 'T00:00:00+08:00').getTime();
+    return Math.max(0, Math.floor((today - time) / 86400000));
+  }
+
+  function dataHealthRows() {
+    const holdings = activeHoldings().filter(h => h.shares > 0);
+    const missingPrices = holdings.filter(h => !(state.prices[h.symbol] > 0)).map(h => h.symbol);
+    const stalePrices = holdings
+      .map(h => ({ symbol: h.symbol, age: priceAgeDays(h.symbol) }))
+      .filter(item => item.age !== null && item.age >= 3);
+    const latestSnap = latestSnapshotDate(state);
+    const snapshotAge = daysSinceDate(latestSnap);
+    const syncAgeMinutes = lastSyncTime ? Math.floor((Date.now() - lastSyncTime) / 60000) : null;
+    const brokenName = hasBrokenNames(state);
+    const rows = [];
+
+    rows.push({
+      label: '雲端同步',
+      status: syncAgeMinutes === null ? 'warn' : syncAgeMinutes > 30 ? 'warn' : 'ok',
+      value: syncAgeMinutes === null ? '尚未同步' : syncAgeMinutes === 0 ? '剛剛同步' : `${syncAgeMinutes} 分鐘前`,
+      note: syncAgeMinutes === null ? '開啟後會自動拉 LINE/雲端資料' : '本機已和雲端交換資料'
+    });
+    rows.push({
+      label: '報價完整度',
+      status: missingPrices.length ? 'bad' : stalePrices.length ? 'warn' : 'ok',
+      value: missingPrices.length ? `${missingPrices.length} 檔缺價` : stalePrices.length ? `${stalePrices.length} 檔過期` : '全部有價',
+      note: missingPrices.length ? `缺價：${missingPrices.slice(0, 5).join('、')}` : stalePrices.length ? `過期：${stalePrices.slice(0, 5).map(x => `${x.symbol} ${x.age}天`).join('、')}` : '目前持股皆可計算市值'
+    });
+    rows.push({
+      label: '資產快照',
+      status: snapshotAge === null ? 'warn' : snapshotAge > 7 ? 'warn' : 'ok',
+      value: latestSnap ? latestSnap : '尚無快照',
+      note: snapshotAge === null ? '資產走勢需要快照才能畫長期曲線' : snapshotAge > 7 ? `已 ${snapshotAge} 天未更新快照` : `距今 ${snapshotAge} 天，走勢可用`
+    });
+    rows.push({
+      label: '名稱資料',
+      status: brokenName ? 'bad' : 'ok',
+      value: brokenName ? '發現壞名稱' : '名稱正常',
+      note: brokenName ? '系統會優先用乾淨名稱與雲端資料修復' : '未偵測到 ??? 或亂碼覆蓋'
+    });
+    rows.push({
+      label: '資料量',
+      status: state.trades.length && state.dividends.length ? 'ok' : 'warn',
+      value: `${state.trades.length} 交易 / ${state.dividends.length} 股利`,
+      note: `目前持股 ${holdings.length} 檔，快照 ${state.snapshots.length} 筆`
+    });
+    return rows;
+  }
+
+  function renderDataHealth() {
+    const grid = $('data-health-grid');
+    if (!grid) return;
+    grid.innerHTML = dataHealthRows().map(row => `
+      <div class="health-tile ${row.status}">
+        <div class="health-label">${row.label}</div>
+        <div class="health-value">${row.value}</div>
+        <div class="health-note">${row.note}</div>
+      </div>
+    `).join('');
+  }
+
+  function buildDataHealthText() {
+    return ['資料健康檢查 ' + todayStr(), ...dataHealthRows().map(row => `${row.label}：${row.value}｜${row.note}`)].join('\n');
+  }
+
   function renderInsights() {
     const k = computeKpis();
     const holdings = evaluatedHoldings();
@@ -2131,6 +2363,11 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     if (top) lines.push(`最大持股 ${top.symbol} ${top.name || ''}，比重 ${fmtPct(top.weight)}`);
     if (best.length) lines.push('貢獻前三：' + best.map(h => `${h.symbol} ${fmt(h.totalProfit)}`).join('、'));
     if (worst.length) lines.push('拖累前三：' + worst.map(h => `${h.symbol} ${fmt(h.totalProfit)}`).join('、'));
+    const actions = actionRadarRows().slice(0, 5);
+    if (actions.length) {
+      lines.push('行動雷達：');
+      actions.forEach(h => lines.push(`${h.symbol} ${h.name || ''}：${h.action.label}，${h.action.reasons[0] || '持續觀察'}`));
+    }
     return lines.join('\n');
   }
 
@@ -2142,7 +2379,15 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       updatedAt: Date.now(),
       text,
       next90Dividend: Math.round(forecastTotal(90)),
-      topHoldings: evaluatedHoldings().slice(0, 5).map(h => ({ symbol: h.symbol, name: h.name, weight: h.weight, mv: Math.round(h.mv) }))
+      topHoldings: evaluatedHoldings().slice(0, 5).map(h => ({ symbol: h.symbol, name: h.name, weight: h.weight, mv: Math.round(h.mv) })),
+      actionRadar: actionRadarRows().slice(0, 8).map(h => ({
+        symbol: h.symbol,
+        name: h.name,
+        action: h.action.label,
+        reasons: h.action.reasons,
+        weight: h.weight,
+        totalReturn: h.totalReturn
+      }))
     };
     return text;
   }
@@ -2859,6 +3104,14 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   $('copy-ai-summary-btn')?.addEventListener('click', () => {
     navigator.clipboard?.writeText(buildLineAssistantSummary());
     showToast('已複製 AI 摘要', 'down');
+  });
+  $('copy-action-radar-btn')?.addEventListener('click', () => {
+    navigator.clipboard?.writeText(buildActionRadarText());
+    showToast('已複製持股行動雷達', 'down');
+  });
+  $('copy-data-health-btn')?.addEventListener('click', () => {
+    navigator.clipboard?.writeText(buildDataHealthText());
+    showToast('已複製資料健康狀態', 'down');
   });
   $('copy-ai-summary-btn-2')?.addEventListener('click', () => {
     navigator.clipboard?.writeText(buildLineAssistantSummary());
