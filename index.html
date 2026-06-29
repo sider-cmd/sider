@@ -270,6 +270,10 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
 .forecast-date { color: var(--text); font-weight: 700; font-size: 13px; }
 .forecast-symbol { color: var(--text); font-weight: 700; }
 .forecast-meta { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+.forecast-confidence { display: inline-flex; align-items: center; border-radius: 999px; padding: 1px 6px; margin-left: 6px; font-size: 11px; font-weight: 800; border: 1px solid var(--border); }
+.forecast-confidence.good { color: var(--down); background: rgba(34,197,94,0.10); border-color: rgba(34,197,94,0.30); }
+.forecast-confidence.mid { color: var(--warn); background: rgba(251,191,36,0.10); border-color: rgba(251,191,36,0.28); }
+.forecast-confidence.bad { color: var(--up); background: rgba(248,81,73,0.10); border-color: rgba(248,81,73,0.28); }
 .risk-list { display: grid; gap: 8px; }
 .risk-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .risk-row:last-child { border-bottom: none; }
@@ -526,7 +530,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         <div class="card-title">未來股利現金流</div>
         <button class="btn btn-sm btn-ghost" id="export-forecast-btn">匯出 CSV</button>
       </div>
-      <div class="note">依照各檔最近配息間隔與目前持股估算，實際金額仍以公司公告為準。</div>
+        <div class="note">這裡是依照歷史配息間隔與目前持股推估的現金流，不是已公告明細；可信度低的項目請以公司公告為準。</div>
       <div class="kpis">
         <div class="kpi"><div class="kpi-label">30 天預估</div><div class="kpi-value" id="forecast-30">$0</div></div>
         <div class="kpi"><div class="kpi-label">90 天預估</div><div class="kpi-value" id="forecast-90">$0</div></div>
@@ -854,6 +858,10 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     const code = String(symbol || '').trim();
     if (CLEAN_STOCK_NAMES[code]) return CLEAN_STOCK_NAMES[code];
     return isBrokenName(name) ? '' : String(name || '').trim();
+  }
+
+  function displayStockName(symbol, name) {
+    return lookupName(symbol) || cleanStockName(symbol, name) || '';
   }
 
   // 核心變數宣告（修正：補上缺失的編輯 ID 變數）
@@ -1632,7 +1640,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       return `<tr>
         <td>${d.date}</td>
         <td><span class="symbol">${d.symbol}</span></td>
-        <td>${d.name || lookupName(d.symbol) || ''}</td>
+        <td>${displayStockName(d.symbol, d.name)}</td>
         <td class="right">${d.year || '-'}</td>
         <td class="right">${fmtNum(d.shares)}</td>
         <td class="right">${fmtNum(d.cash||0,2)}</td>
@@ -2068,6 +2076,14 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     return gaps[Math.floor(gaps.length / 2)] || 365;
   }
 
+  function dividendForecastConfidence(items, gap) {
+    const cashItems = items.filter(d => d.cash > 0);
+    if (cashItems.length >= 5 && gap <= 45) return { label: '高', className: 'good', note: '月配息節奏穩定' };
+    if (cashItems.length >= 3 && gap <= 120) return { label: '中', className: 'mid', note: '近期配息可參考' };
+    if (cashItems.length >= 2) return { label: '中', className: 'mid', note: '用歷史間隔估算' };
+    return { label: '低', className: 'bad', note: '樣本少，請以公告為準' };
+  }
+
   function buildDividendForecast(days) {
     const horizon = days || 365;
     const today = new Date();
@@ -2091,7 +2107,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       if (!last) return;
       const gap = Math.max(28, Math.min(370, medianGapDays(recent.map(d => d.date))));
       const avgCash = recent.reduce((sum, d) => sum + (d.cash || 0), 0) / recent.length;
-      const name = last.name || lookupName(symbol) || '';
+      const name = displayStockName(symbol, last.name);
+      const confidence = dividendForecastConfidence(recent, gap);
       let next = new Date(last.date + 'T00:00:00');
       while (next <= today) next = new Date(next.getTime() + gap * 86400000);
       while (next <= end) {
@@ -2103,7 +2120,10 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
           shares: currentShares[symbol],
           cash: avgCash,
           amount: gross,
-          gap
+          gap,
+          confidence: confidence.label,
+          confidenceClass: confidence.className,
+          confidenceNote: confidence.note
         });
         next = new Date(next.getTime() + gap * 86400000);
       }
@@ -2430,8 +2450,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       <div class="forecast-item">
         <div class="forecast-date">${r.date}</div>
         <div>
-          <div class="forecast-symbol">${r.symbol} ${r.name || ''}</div>
-          <div class="forecast-meta">${fmtNum(r.shares)} 股 × 每股 ${fmtNum(r.cash, 4)}｜約每 ${r.gap} 天</div>
+          <div class="forecast-symbol">${r.symbol} ${displayStockName(r.symbol, r.name)}</div>
+          <div class="forecast-meta">${fmtNum(r.shares)} 股 × 每股 ${fmtNum(r.cash, 4)}｜約每 ${r.gap} 天<span class="forecast-confidence ${r.confidenceClass}" title="${r.confidenceNote}">可信度 ${r.confidence}</span></div>
         </div>
         <div class="right up"><strong>${fmt(r.amount)}</strong></div>
       </div>
@@ -2496,8 +2516,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   function exportForecastCsv() {
     const rows = buildDividendForecast(365);
     if (rows.length === 0) { showToast('沒有預估股利可匯出'); return; }
-    const csv = '日期,代號,名稱,股數,預估每股股利,預估金額,估算間隔天數\n' + rows.map(r => [
-      r.date, r.symbol, r.name || '', Math.round(r.shares), r.cash.toFixed(4), Math.round(r.amount), r.gap
+    const csv = '日期,代號,名稱,股數,預估每股股利,預估金額,估算間隔天數,可信度,說明\n' + rows.map(r => [
+      r.date, r.symbol, displayStockName(r.symbol, r.name), Math.round(r.shares), r.cash.toFixed(4), Math.round(r.amount), r.gap, r.confidence || '', r.confidenceNote || ''
     ].join(',')).join('\n');
     const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -2739,7 +2759,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     $('add-div-btn').textContent = '更新股利';
     $('cancel-div-edit-btn').style.display = 'inline-block';
     $('div-edit-banner').style.display = 'block';
-    $('div-edit-info').textContent = `${d.symbol} ${d.name || ''}　${d.date}　${d.year || ''} 年度`;
+    $('div-edit-info').textContent = `${d.symbol} ${displayStockName(d.symbol, d.name)}　${d.date}　${d.year || ''} 年度`;
     updateDivPreview();
     $('div-form-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
