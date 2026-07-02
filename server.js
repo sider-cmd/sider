@@ -3146,6 +3146,7 @@ async function handleEvent(event) {
 📸 記錄快照：資產快照
 📆 期間盈虧：月盈虧 / 季盈虧 / 年盈虧
 📊 交易報表：交易月報 / 交易季報 / 交易年報
+📈 每月交易量：每月交易量 / 交易量
 🛡️ 風險控管：風險控管
 ⚖️ 再平衡建議：再平衡 / 再平衡 18 保守
 🧮 減碼試算：再平衡試算 由田 100
@@ -3985,6 +3986,92 @@ ${sellRows.length ? sellRows.join("\n") : "無"}
 提醒：已實現損益以交易紀錄中的賣出損益為準；批次匯入若未填賣出損益，會以 0 計。`;
 };
 
+const buildMonthlyTradeVolumeReport = async (ownerKey, stockNames, limit = 12) => {
+  const trades = await getAllTrades(ownerKey);
+  const monthly = new Map();
+
+  for (const trade of trades) {
+    const date = parseTradeDate(trade.tradedAt);
+    if (!date) continue;
+    const monthKey = `${date.year}-${String(date.month).padStart(2, "0")}`;
+    const amount = Number(trade.shares || 0) * Number(trade.price || 0);
+    const row =
+      monthly.get(monthKey) || {
+        month: monthKey,
+        count: 0,
+        buyCount: 0,
+        sellCount: 0,
+        buyAmount: 0,
+        sellAmount: 0,
+        fee: 0,
+        tax: 0,
+        realizedProfit: 0,
+        byCode: new Map()
+      };
+    row.count += 1;
+    row.fee += Number(trade.fee || 0);
+    row.tax += Number(trade.tax || 0);
+    if (trade.type === "buy") {
+      row.buyCount += 1;
+      row.buyAmount += amount;
+    } else {
+      row.sellCount += 1;
+      row.sellAmount += amount;
+      row.realizedProfit += Number(trade.realizedProfit || 0);
+    }
+    const saved = row.byCode.get(trade.code) || {
+      code: trade.code,
+      shares: 0,
+      amount: 0
+    };
+    saved.shares += Number(trade.shares || 0);
+    saved.amount += amount;
+    row.byCode.set(trade.code, saved);
+    monthly.set(monthKey, row);
+  }
+
+  const rows = [...monthly.values()]
+    .map((row) => ({
+      ...row,
+      volume: row.buyAmount + row.sellAmount,
+      netCashFlow: row.sellAmount - row.buyAmount - row.fee - row.tax,
+      topRows: topTradeRows(row.byCode, stockNames, 1)
+    }))
+    .sort((a, b) => b.month.localeCompare(a.month))
+    .slice(0, limit);
+
+  if (rows.length === 0) {
+    return `📊 每月交易量
+
+目前沒有可統計的交易紀錄。`;
+  }
+
+  const totalVolume = rows.reduce((sum, row) => sum + row.volume, 0);
+  const totalCount = rows.reduce((sum, row) => sum + row.count, 0);
+  const mostActive = [...rows].sort((a, b) => b.volume - a.volume)[0];
+  const lines = rows.map(
+    (row) => `${row.month}
+交易量：${formatMoney(row.volume)} 元｜${row.count} 筆
+買進：${formatMoney(row.buyAmount)} 元 / ${row.buyCount} 筆
+賣出：${formatMoney(row.sellAmount)} 元 / ${row.sellCount} 筆
+現金流：${profitSign(row.netCashFlow)}${formatMoney(row.netCashFlow)} 元｜已實現 ${profitSign(
+      row.realizedProfit
+    )}${formatMoney(row.realizedProfit)} 元
+最大標的：${row.topRows[0] || "無"}`
+  );
+
+  return `📊 每月交易量
+
+最近 ${rows.length} 個有交易月份
+總交易量：${formatMoney(totalVolume)} 元
+交易筆數：${totalCount} 筆
+最活躍月份：${mostActive.month}｜${formatMoney(mostActive.volume)} 元
+
+${lines.join("\n\n")}
+
+看法：交易量高的月份代表你資金調整比較多，可搭配「月盈虧」看交易是否真的有提高績效。`;
+};
+
 const formatPortfolioSnapshot = (item) => {
   if (item.error) {
     return `${stockLabel(item.code, item.name)}：即時損益查詢失敗`;
@@ -4474,6 +4561,14 @@ if (tradeReportMatch) {
     tradeReportMatch[2] || "",
     stockNames
   );
+  return client.replyMessage(event.replyToken, {
+    type: "text",
+    text
+  });
+}
+
+if (["每月交易量", "月交易量", "交易量"].includes(userMessage.trim())) {
+  const text = await buildMonthlyTradeVolumeReport(watchlistKey, stockNames);
   return client.replyMessage(event.replyToken, {
     type: "text",
     text
