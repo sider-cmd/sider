@@ -626,6 +626,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       <div class="kpi"><div class="kpi-label">本月總盈虧</div><div class="kpi-value" id="monthly-pnl">$0</div></div>
       <div class="kpi"><div class="kpi-label">本月報酬率</div><div class="kpi-value" id="monthly-return">0.00%</div></div>
       <div class="kpi"><div class="kpi-label">本月淨投入</div><div class="kpi-value" id="monthly-net-flow">$0</div></div>
+      <div class="kpi"><div class="kpi-label">本月交易量</div><div class="kpi-value" id="monthly-trade-volume">$0</div></div>
+      <div class="kpi"><div class="kpi-label">本月交易筆數</div><div class="kpi-value" id="monthly-trade-count">0</div></div>
       <div class="kpi"><div class="kpi-label">已實現損益</div><div class="kpi-value" id="monthly-realized">$0</div></div>
       <div class="kpi"><div class="kpi-label">未實現變化</div><div class="kpi-value" id="monthly-unrealized">$0</div></div>
       <div class="kpi"><div class="kpi-label">股利收入</div><div class="kpi-value" id="monthly-dividend">$0</div></div>
@@ -646,6 +648,10 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
             <th>月份</th>
             <th class="right">月初權益</th>
             <th class="right">月末權益</th>
+            <th class="right">交易量</th>
+            <th class="right">買進</th>
+            <th class="right">賣出</th>
+            <th class="right">筆數</th>
             <th class="right">淨投入</th>
             <th class="right">已實現</th>
             <th class="right">未實現變化</th>
@@ -1928,6 +1934,46 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       .reduce((sum, t) => sum + Number(t.shares || 0) * Number(t.price || 0) + Number(t.fee || 0), 0);
   }
 
+  function monthlyTradeVolume(month) {
+    return state.trades
+      .filter(t => monthKey(t.date) === month)
+      .reduce((acc, t) => {
+        const amount = Number(t.shares || 0) * Number(t.price || 0);
+        const cost = amount + Number(t.fee || 0) + Number(t.tax || 0);
+        const bucket = t.type === 'sell' ? 'sell' : 'buy';
+        acc.count += 1;
+        acc.volume += amount;
+        acc.fee += Number(t.fee || 0);
+        acc.tax += Number(t.tax || 0);
+        acc[bucket].count += 1;
+        acc[bucket].amount += amount;
+        acc[bucket].cost += cost;
+        const symbol = String(t.symbol || '').trim();
+        if (symbol) {
+          const saved = acc.bySymbol.get(symbol) || { symbol, name: t.name || lookupName(symbol), amount: 0, count: 0 };
+          saved.amount += amount;
+          saved.count += 1;
+          acc.bySymbol.set(symbol, saved);
+        }
+        return acc;
+      }, {
+        count: 0,
+        volume: 0,
+        fee: 0,
+        tax: 0,
+        buy: { count: 0, amount: 0, cost: 0 },
+        sell: { count: 0, amount: 0, cost: 0 },
+        bySymbol: new Map()
+      });
+  }
+
+  function monthlyTopTradeSymbol(volume) {
+    const rows = [...(volume?.bySymbol || new Map()).values()].sort((a, b) => b.amount - a.amount);
+    if (!rows.length) return '-';
+    const top = rows[0];
+    return `${top.symbol} ${top.name || lookupName(top.symbol) || ''} ${fmt(top.amount)}`;
+  }
+
   function buildMonthlyPnlRows() {
     let snaps = [...state.snapshots];
     const preview = currentSnapshotPreview();
@@ -1959,6 +2005,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       const endTotal = snapshotTotal(endSnap);
       const netFlow = monthlyTradeFlow(month);
       const buyFlow = monthlyBuyFlow(month);
+      const tradeVolume = monthlyTradeVolume(month);
       const realized = Number(endSnap.realized || 0) - Number(startSnap.realized || 0);
       const dividend = Number(endSnap.dividend || 0) - Number(startSnap.dividend || 0);
       const pnl = endTotal - startTotal - netFlow;
@@ -1970,6 +2017,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         month,
         startTotal,
         endTotal,
+        tradeVolume,
         netFlow,
         realized,
         unrealized,
@@ -1994,6 +2042,16 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     returnEl.textContent = latest && latest.returnPct !== null ? fmtPct(latest.returnPct) : '0.00%';
     returnEl.className = 'kpi-value ' + plClass(latest?.returnPct || 0);
     setMoney('monthly-net-flow', latest?.netFlow || 0);
+    const volumeEl = $('monthly-trade-volume');
+    if (volumeEl) {
+      volumeEl.textContent = fmt(latest?.tradeVolume?.volume || 0);
+      volumeEl.className = 'kpi-value';
+    }
+    const countEl = $('monthly-trade-count');
+    if (countEl) {
+      countEl.textContent = String(latest?.tradeVolume?.count || 0);
+      countEl.className = 'kpi-value';
+    }
     setMoney('monthly-realized', latest?.realized || 0);
     setMoney('monthly-unrealized', latest?.unrealized || 0);
     setMoney('monthly-dividend', latest?.dividend || 0);
@@ -2012,6 +2070,10 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         <td>${row.month}${note}</td>
         <td class="right">${fmt(row.startTotal)}</td>
         <td class="right">${fmt(row.endTotal)}</td>
+        <td class="right">${fmt(row.tradeVolume.volume)}</td>
+        <td class="right">${fmt(row.tradeVolume.buy.amount)}</td>
+        <td class="right">${fmt(row.tradeVolume.sell.amount)}</td>
+        <td class="right" title="最大交易標的：${monthlyTopTradeSymbol(row.tradeVolume)}">${row.tradeVolume.count}</td>
         <td class="right ${plClass(-row.netFlow)}">${fmt(row.netFlow)}</td>
         <td class="right ${plClass(row.realized)}">${fmt(row.realized)}</td>
         <td class="right ${plClass(row.unrealized)}">${fmt(row.unrealized)}</td>
@@ -2025,10 +2087,17 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   function exportMonthlyPnlCsv() {
     const rows = buildMonthlyPnlRows();
     if (rows.length === 0) { showToast('沒有月盈虧資料可匯出'); return; }
-    const csv = '月份,月初權益,月末權益,淨投入,已實現損益,未實現變化,股利,總盈虧,報酬率\n' + rows.map(r => [
+    const csv = '月份,月初權益,月末權益,交易量,買進金額,賣出金額,交易筆數,手續費,交易稅,最大交易標的,淨投入,已實現損益,未實現變化,股利,總盈虧,報酬率\n' + rows.map(r => [
       r.month,
       Math.round(r.startTotal),
       Math.round(r.endTotal),
+      Math.round(r.tradeVolume.volume),
+      Math.round(r.tradeVolume.buy.amount),
+      Math.round(r.tradeVolume.sell.amount),
+      r.tradeVolume.count,
+      Math.round(r.tradeVolume.fee),
+      Math.round(r.tradeVolume.tax),
+      monthlyTopTradeSymbol(r.tradeVolume),
       Math.round(r.netFlow),
       Math.round(r.realized),
       Math.round(r.unrealized),
