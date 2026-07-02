@@ -2441,7 +2441,7 @@ ${rows.length ? rows.map(formatRow).join("\n\n") : emptyText}`;
     { positive: 0, negative: 0 }
   );
 
-  return toLineSafeText(`📊 每日持股籌碼雷達
+  return toLineSafeText(`📊 每日持股行動雷達
 法人資料日：${latestChipDate}
 大戶資料日：${formatTdccDate(latestHolderDate)}
 
@@ -2808,6 +2808,17 @@ const buildIntradayDecisionAnalysis = async (ownerKey, stockNameLookup = {}) => 
     return `盤中分析\n\n目前 ${entries.length} 檔持股報價都查詢失敗，暫時無法分析。`;
   }
 
+  const tdcc = await getTdccShareholdingRowsByCode().catch((error) => {
+    console.error("TDCC shareholding fetch failed for intraday decision analysis:", error.message);
+    return { rowsByCode: new Map(), sourceDate: null };
+  });
+  const formatIntradayHolderLine = (holder) =>
+    holder
+      ? `大戶：400張+ ${formatShareholdingPercent(holder.bigPercent)}，千張+ ${formatShareholdingPercent(
+          holder.megaPercent
+        )}，散戶 ${formatShareholdingPercent(holder.retailPercent)}`
+      : "大戶：TDCC 週資料不足";
+
   const rows = analysisItems(totals.successful).map((item) => ({
     ...item,
     weightPercent: totals.totalMarket > 0 ? (item.marketValue / totals.totalMarket) * 100 : 0
@@ -2828,9 +2839,10 @@ const buildIntradayDecisionAnalysis = async (ownerKey, stockNameLookup = {}) => 
         fetchInstitutionalChipSummary(item.code),
         fetchMarginChipSummary(item.code)
       ]);
+      const holder = summarizeShareholdingRows(tdcc.rowsByCode.get(item.code));
       const level = analysisLevelForHolding(item, chip, margin, item.weightPercent);
       const action = recommendProfessionalIntradayAction(item, chip, margin, level);
-      return { item, chip, margin, level, action };
+      return { item, chip, margin, holder, level, action };
     })
   );
 
@@ -2850,13 +2862,14 @@ const buildIntradayDecisionAnalysis = async (ownerKey, stockNameLookup = {}) => 
       const order = { "高風險": 0, "注意": 1, "可檢視停利": 2, "觀察": 3 };
       return order[a.level.level] - order[b.level.level] || a.item.profitPercent - b.item.profitPercent;
     })
-    .map(({ item, chip, margin, level, action }, index) => {
+    .map(({ item, chip, margin, holder, level, action }, index) => {
       const name = stockLabel(item.code, item.name || stockNameLookup[item.code]);
       return `${index + 1}. ${name}
 等級：${level.level}
 建議：${action.action}（${action.reason}）
 持股損益：${signedMoney(item.profit)} (${signedPercent(item.profitPercent)})，占比 ${item.weightPercent.toFixed(1)}%
 ${chip.text}
+${formatIntradayHolderLine(holder)}
 ${margin.text}
 判斷：${level.reasons.join("、")}`;
     })
@@ -3147,6 +3160,7 @@ async function handleEvent(event) {
 📆 期間盈虧：月盈虧 / 季盈虧 / 年盈虧
 📊 交易報表：交易月報 / 交易季報 / 交易年報
 📈 每月交易量：每月交易量 / 交易量
+📡 持股行動雷達：持股行動雷達 / 每日籌碼
 🛡️ 風險控管：風險控管
 ⚖️ 再平衡建議：再平衡 / 再平衡 18 保守
 🧮 減碼試算：再平衡試算 由田 100
@@ -3642,7 +3656,7 @@ if (["大戶動向", "集保級距", "大戶週報", "集保週報"].includes(ma
   }
 }
 
-if (["每日籌碼", "每日籌碼動向", "每日大戶外資", "大戶外資動向", "持股籌碼"].includes(marketInput)) {
+if (["每日籌碼", "每日籌碼動向", "每日大戶外資", "大戶外資動向", "持股籌碼", "持股行動雷達", "行動雷達"].includes(marketInput)) {
   try {
     const report = await buildDailyChipMovementReport(watchlistKey);
     return client.replyMessage(event.replyToken, {
