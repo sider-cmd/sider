@@ -307,6 +307,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
 .ai-dashboard-link { color: var(--accent); text-decoration: none; font-size: 11px; font-weight: 700; }
 .ai-dashboard-line { color: var(--text-muted); font-size: 11px; line-height: 1.35; }
 .ai-dashboard-line.stale { color: var(--warn); }
+.ai-watch-meta { color: var(--text-muted); font-size: 12px; line-height: 1.5; white-space: normal; }
 .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
 .health-tile { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; min-height: 92px; }
 .health-tile.ok { border-color: rgba(34,197,94,0.28); background: rgba(34,197,94,0.07); }
@@ -489,6 +490,29 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
           <button class="btn btn-sm" id="pe-save">儲存</button>
           <button class="btn btn-sm btn-ghost" id="pe-cancel">取消</button>
         </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">AI 觀察清單</div>
+          <div class="ai-watch-meta">從交易與股利紀錄自動列出已不在目前持股內的標的</div>
+        </div>
+        <button class="btn btn-sm btn-ghost" id="ai-watch-refresh-btn">更新AI</button>
+      </div>
+      <div id="ai-watch-empty" class="empty">目前沒有歷史觀察標的</div>
+      <div id="ai-watch-wrap" class="table-wrap" style="display:none;">
+        <table>
+          <thead><tr>
+            <th>代號</th>
+            <th>名稱</th>
+            <th>來源</th>
+            <th>最近日期</th>
+            <th>AI</th>
+          </tr></thead>
+          <tbody id="ai-watch-tbody"></tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -1638,6 +1662,37 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     });
   }
 
+  function aiWatchlistRows() {
+    const activeSymbols = new Set(activeHoldings().filter(h => h.shares > 0).map(h => h.symbol));
+    const rowsBySymbol = new Map();
+
+    function addWatchSource(record, sourceLabel) {
+      const symbol = String(record?.symbol || '').trim();
+      if (!symbol || activeSymbols.has(symbol)) return;
+      const existing = rowsBySymbol.get(symbol) || {
+        symbol,
+        name: displayStockName(symbol, record?.name),
+        sources: new Set(),
+        lastDate: ''
+      };
+      const cleanName = displayStockName(symbol, record?.name);
+      if (cleanName) existing.name = cleanName;
+      existing.sources.add(sourceLabel);
+      if (record?.date && (!existing.lastDate || String(record.date) > existing.lastDate)) {
+        existing.lastDate = String(record.date);
+      }
+      rowsBySymbol.set(symbol, existing);
+    }
+
+    (state.trades || []).forEach(t => addWatchSource(t, '交易'));
+    (state.dividends || []).forEach(d => addWatchSource(d, '股利'));
+
+    return [...rowsBySymbol.values()]
+      .map(row => ({ ...row, sources: [...row.sources].join(' / ') }))
+      .sort((a, b) => (b.lastDate || '').localeCompare(a.lastDate || '') || a.symbol.localeCompare(b.symbol))
+      .slice(0, 20);
+  }
+
   async function loadAiDashboardSummary(symbol) {
     const cached = aiDashboardCache.get(symbol);
     if (cached && Date.now() - cached.fetchedAt < 10 * 60 * 1000) return cached.data;
@@ -1660,9 +1715,9 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     const uniqueSymbols = [...new Set(symbols.filter(Boolean))];
     await Promise.all(uniqueSymbols.map(async symbol => {
       const summary = await loadAiDashboardSummary(symbol);
-      if (token !== aiDashboardRenderToken) return;
-      const cell = document.querySelector(`[data-ai-symbol="${CSS.escape(symbol)}"]`);
-      if (cell) cell.innerHTML = renderAiDashboardCell(summary);
+      document.querySelectorAll(`[data-ai-symbol="${CSS.escape(symbol)}"]`).forEach(cell => {
+        cell.innerHTML = renderAiDashboardCell(summary);
+      });
     }));
     if (token === aiDashboardRenderToken && aiRiskSortEnabled) renderHoldings(true);
   }
@@ -1712,6 +1767,26 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     }).join('');
     if (!skipAiHydrate) hydrateAiDashboardSummaries(hs.map(h => h.symbol));
     document.querySelectorAll('.set-price').forEach(b => b.addEventListener('click', () => openPriceEditor(b.dataset.symbol)));
+  }
+
+  function renderAiWatchlist() {
+    const rows = aiWatchlistRows();
+    if (rows.length === 0) {
+      $('ai-watch-empty').style.display = 'block';
+      $('ai-watch-wrap').style.display = 'none';
+      return;
+    }
+
+    $('ai-watch-empty').style.display = 'none';
+    $('ai-watch-wrap').style.display = 'block';
+    $('ai-watch-tbody').innerHTML = rows.map(row => `<tr>
+      <td><span class="symbol">${escapeHtml(row.symbol)}</span></td>
+      <td>${escapeHtml(row.name || lookupName(row.symbol) || '')}</td>
+      <td><span class="ai-watch-meta">${escapeHtml(row.sources)}</span></td>
+      <td><span class="ai-watch-meta">${escapeHtml(row.lastDate || '-')}</span></td>
+      <td class="ai-dashboard-cell" data-ai-symbol="${escapeHtml(row.symbol)}">${renderAiDashboardCell(aiDashboardCache.get(row.symbol)?.data)}</td>
+    </tr>`).join('');
+    hydrateAiDashboardSummaries(rows.map(row => row.symbol));
   }
 
   function renderTrades() {
@@ -2830,7 +2905,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     a.click(); URL.revokeObjectURL(url);
   }
 
-  function renderAll() { renderOverview(); renderInsights(); renderDividendForecast(); renderAiSummaryPreview(); renderHoldings(); renderTrades(); renderDividends(); renderMonthlyPnl(); renderCustomList(); renderExcludedList(); renderTrend(); }
+  function renderAll() { renderOverview(); renderInsights(); renderDividendForecast(); renderAiSummaryPreview(); renderHoldings(); renderAiWatchlist(); renderTrades(); renderDividends(); renderMonthlyPnl(); renderCustomList(); renderExcludedList(); renderTrend(); }
 
   window.__applyPortfolioRestore = function(restoredData) {
     state = normalizeStateShape(JSON.parse(JSON.stringify(restoredData)));
@@ -2839,7 +2914,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     loadCfg();
     const renderSteps = [
       renderOverview, renderInsights, renderDividendForecast,
-      renderAiSummaryPreview, renderHoldings, renderTrades,
+      renderAiSummaryPreview, renderHoldings, renderAiWatchlist, renderTrades,
       renderDividends, renderMonthlyPnl, renderCustomList,
       renderExcludedList, renderTrend
     ];
@@ -3206,6 +3281,10 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     aiRiskSortEnabled = !aiRiskSortEnabled;
     $('ai-risk-sort-btn').classList.toggle('active', aiRiskSortEnabled);
     renderHoldings();
+  });
+  $('ai-watch-refresh-btn').addEventListener('click', () => {
+    aiWatchlistRows().forEach(row => aiDashboardCache.delete(row.symbol));
+    renderAiWatchlist();
   });
 
   $('add-custom-btn').addEventListener('click', () => {
