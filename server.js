@@ -53,6 +53,9 @@ const JSONBIN_BIN_ID = process.env.JSONBIN_BIN_ID;
 const hasCloudState = Boolean(JSONBIN_API_KEY && JSONBIN_BIN_ID);
 const AI_DASHBOARD_BASE_URL =
   (process.env.AI_DASHBOARD_BASE_URL || "http://49.159.84.162:8050").replace(/\/$/, "");
+const AI_DASHBOARD_CACHE_TTL_MS =
+  Number(process.env.AI_DASHBOARD_CACHE_TTL_MS || 10 * 60 * 1000);
+const aiDashboardSummaryCache = new Map();
 
 const jsonBinUrl = (suffix = "") =>
   `https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}${suffix}`;
@@ -8171,17 +8174,47 @@ app.get('/api/ai-dashboard-summary/:symbol', async (req, res) => {
     return res.status(400).json({ ok: false, error: "Invalid symbol" });
   }
 
+  const timeframe = String(req.query.timeframe || "D");
+  const refresh = req.query.refresh === "1" || req.query.refresh === "true";
+  const cacheKey = `${symbol}:${timeframe}`;
+  const cached = aiDashboardSummaryCache.get(cacheKey);
+  if (!refresh && cached && Date.now() - cached.cachedAt < AI_DASHBOARD_CACHE_TTL_MS) {
+    return res.json({
+      ...cached.data,
+      cached: true,
+      stale: false,
+      cachedAt: new Date(cached.cachedAt).toISOString()
+    });
+  }
+
   try {
     const response = await axios.get(`${AI_DASHBOARD_BASE_URL}/api/dashboard`, {
       params: {
         symbol,
-        timeframe: String(req.query.timeframe || "D"),
-        refresh: req.query.refresh === "1" || req.query.refresh === "true" ? "true" : "false"
+        timeframe,
+        refresh: refresh ? "true" : "false"
       },
       timeout: 12000
     });
-    res.json(compactAiDashboardSummary(response.data, symbol));
+    const summary = compactAiDashboardSummary(response.data, symbol);
+    const cachedAt = Date.now();
+    aiDashboardSummaryCache.set(cacheKey, { data: summary, cachedAt });
+    res.json({
+      ...summary,
+      cached: false,
+      stale: false,
+      cachedAt: new Date(cachedAt).toISOString()
+    });
   } catch (error) {
+    if (cached) {
+      return res.json({
+        ...cached.data,
+        cached: true,
+        stale: true,
+        cachedAt: new Date(cached.cachedAt).toISOString(),
+        warning: serviceErrorMessage(error)
+      });
+    }
     const status = error.response?.status || 502;
     res.status(status).json({
       ok: false,
