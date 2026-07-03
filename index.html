@@ -150,6 +150,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
 .btn-ghost:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.btn-ghost.active { background: rgba(91, 158, 255, 0.16); border-color: var(--accent); color: var(--accent-hover); }
 .btn-danger { background: transparent; border: 1px solid var(--up); color: var(--up); }
 .btn-danger:hover { background: rgba(255, 87, 87, 0.1); }
 .btn-sm { padding: 6px 10px; font-size: 12px; }
@@ -305,6 +306,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
 .ai-dashboard-signal.bad { color: var(--up); border-color: rgba(248,81,73,0.30); background: rgba(248,81,73,0.10); }
 .ai-dashboard-link { color: var(--accent); text-decoration: none; font-size: 11px; font-weight: 700; }
 .ai-dashboard-line { color: var(--text-muted); font-size: 11px; line-height: 1.35; }
+.ai-dashboard-line.stale { color: var(--warn); }
 .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
 .health-tile { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; min-height: 92px; }
 .health-tile.ok { border-color: rgba(34,197,94,0.28); background: rgba(34,197,94,0.07); }
@@ -459,7 +461,10 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     <div class="card">
       <div class="card-header">
         <div class="card-title">目前持股</div>
-        <button class="btn btn-sm btn-ghost" id="refresh-prices-btn-2">↻ 更新報價</button>
+        <div class="btn-row">
+          <button class="btn btn-sm btn-ghost" id="ai-risk-sort-btn">AI風險</button>
+          <button class="btn btn-sm btn-ghost" id="refresh-prices-btn-2">↻ 更新報價</button>
+        </div>
       </div>
       <div id="holdings-empty" class="empty">尚無持股<div class="empty-hint">先到「交易」分頁新增買進紀錄</div></div>
       <div id="holdings-wrap" class="table-wrap" style="display:none;">
@@ -933,6 +938,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   let allowSnapshotOverwriteOnce = false;
   const aiDashboardCache = new Map();
   let aiDashboardRenderToken = 0;
+  let aiRiskSortEnabled = false;
 
   function normalizeExcludedSymbols(raw) {
     const normalized = { ...DEFAULT_EXCLUDED_SYMBOLS };
@@ -1606,6 +1612,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     const meta = [confidence, risk].filter(Boolean).join(' / ');
     const levels = [target, stop].filter(Boolean).join(' / ');
     const title = [summary.headline, summary.strategy].filter(Boolean).join('｜');
+    const staleNote = summary.stale ? '<span class="ai-dashboard-line stale">沿用快取</span>' : '';
     return `<span class="ai-dashboard-summary" title="${escapeHtml(title)}">
       <span class="ai-dashboard-head">
         <span class="ai-dashboard-signal ${aiDashboardSignalClass(summary)}">${escapeHtml(signal)}</span>
@@ -1613,7 +1620,22 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       </span>
       <span class="ai-dashboard-line">${escapeHtml(meta || summary.headline || '')}</span>
       <span class="ai-dashboard-line">${escapeHtml(levels || summary.strategy || '')}</span>
+      ${staleNote}
     </span>`;
+  }
+
+  function aiDashboardRisk(symbol) {
+    const risk = Number(aiDashboardCache.get(symbol)?.data?.risk);
+    return Number.isFinite(risk) ? risk : -1;
+  }
+
+  function sortHoldingsByAiRisk(holdings) {
+    if (!aiRiskSortEnabled) return holdings;
+    return [...holdings].sort((a, b) => {
+      const riskDiff = aiDashboardRisk(b.symbol) - aiDashboardRisk(a.symbol);
+      if (riskDiff !== 0) return riskDiff;
+      return String(a.symbol).localeCompare(String(b.symbol));
+    });
   }
 
   async function loadAiDashboardSummary(symbol) {
@@ -1642,10 +1664,11 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       const cell = document.querySelector(`[data-ai-symbol="${CSS.escape(symbol)}"]`);
       if (cell) cell.innerHTML = renderAiDashboardCell(summary);
     }));
+    if (token === aiDashboardRenderToken && aiRiskSortEnabled) renderHoldings(true);
   }
 
-  function renderHoldings() {
-    const hs = activeHoldings().filter(h => h.shares > 0);
+  function renderHoldings(skipAiHydrate = false) {
+    const hs = sortHoldingsByAiRisk(activeHoldings().filter(h => h.shares > 0));
     if (hs.length === 0) { $('holdings-empty').style.display = 'block'; $('holdings-wrap').style.display = 'none'; return; }
     $('holdings-empty').style.display = 'none'; $('holdings-wrap').style.display = 'block';
     const totalMv = hs.reduce((sum, h) => sum + h.shares * (state.prices[h.symbol] || 0), 0);
@@ -1687,7 +1710,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         <td class="right"><button class="btn btn-sm btn-ghost set-price" data-symbol="${h.symbol}">手動</button></td>
       </tr>`;
     }).join('');
-    hydrateAiDashboardSummaries(hs.map(h => h.symbol));
+    if (!skipAiHydrate) hydrateAiDashboardSummaries(hs.map(h => h.symbol));
     document.querySelectorAll('.set-price').forEach(b => b.addEventListener('click', () => openPriceEditor(b.dataset.symbol)));
   }
 
@@ -3179,6 +3202,11 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   });
   $('refresh-prices-btn').addEventListener('click', () => refreshAllPrices(false));
   $('refresh-prices-btn-2').addEventListener('click', () => refreshAllPrices(false));
+  $('ai-risk-sort-btn').addEventListener('click', () => {
+    aiRiskSortEnabled = !aiRiskSortEnabled;
+    $('ai-risk-sort-btn').classList.toggle('active', aiRiskSortEnabled);
+    renderHoldings();
+  });
 
   $('add-custom-btn').addEventListener('click', () => {
     const s = $('custom-symbol').value.trim();
