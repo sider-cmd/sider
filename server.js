@@ -51,6 +51,8 @@ const hasPortfolioDb = Boolean(SUPABASE_URL && SUPABASE_KEY);
 const JSONBIN_API_KEY = process.env.JSONBIN_API_KEY;
 const JSONBIN_BIN_ID = process.env.JSONBIN_BIN_ID;
 const hasCloudState = Boolean(JSONBIN_API_KEY && JSONBIN_BIN_ID);
+const AI_DASHBOARD_BASE_URL =
+  (process.env.AI_DASHBOARD_BASE_URL || "http://49.159.84.162:8050").replace(/\/$/, "");
 
 const jsonBinUrl = (suffix = "") =>
   `https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}${suffix}`;
@@ -77,6 +79,57 @@ const serviceErrorMessage = (error) => {
       .join("｜");
   }
   return error?.message || "未知錯誤";
+};
+
+const toFiniteNumber = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+};
+
+const normalizeDashboardSymbol = (symbol) => {
+  const normalized = String(symbol || "").trim().toUpperCase();
+  return /^[0-9A-Z]{2,12}$/.test(normalized) ? normalized : "";
+};
+
+const compactAiDashboardSummary = (data, symbol) => {
+  const panel12 = data?.panel12 || {};
+  const panel2 = data?.panel2 || {};
+  const panel3 = data?.panel3 || {};
+  const panel8 = data?.panel8 || {};
+  const panel10 = data?.panel10 || {};
+  const scenario =
+    Array.isArray(panel10.scenarios) && panel10.scenarios.length
+      ? panel10.scenarios.find((item) => item?.tone === "base") || panel10.scenarios[0]
+      : null;
+  const projectedPrice =
+    Array.isArray(scenario?.prices) && scenario.prices.length
+      ? toFiniteNumber(scenario.prices[scenario.prices.length - 1])
+      : null;
+
+  return {
+    ok: true,
+    symbol,
+    name: data?.meta?.name || "",
+    updatedAt: data?.meta?.updated_at || null,
+    dashboardUrl: `${AI_DASHBOARD_BASE_URL}/?symbol=${encodeURIComponent(symbol)}`,
+    price: toFiniteNumber(data?.ticker?.price),
+    changeRate: toFiniteNumber(data?.ticker?.change_rate),
+    signal: panel12.signal || "",
+    headline: panel12.headline || "",
+    confidence: toFiniteNumber(panel12.confidence),
+    risk: toFiniteNumber(panel12.risk),
+    riskLevel: panel12.risk_level || "",
+    strategy: panel12.strategy || "",
+    target: Array.isArray(panel12.targets) ? toFiniteNumber(panel12.targets[0]) : null,
+    stop: toFiniteNumber(panel12.stop),
+    daytradeAdvice: panel2.daytrade_advice || "",
+    daytradeRisk: toFiniteNumber(panel2.risk),
+    chipRank: panel3.rank || "",
+    chipScore: toFiniteNumber(panel3.score),
+    health: panel8.summary || "",
+    projection: projectedPrice,
+    dataQuality: toFiniteNumber(data?.meta?.data_quality)
+  };
 };
 
 const portfolioApiUrl = () =>
@@ -8108,6 +8161,32 @@ app.get('/api/web-sync/pull', requireWebSyncToken, async (req, res) => {
     res.status(500).json({
       ok: false,
       error: `從 LINE 資料庫讀取失敗：${serviceErrorMessage(error)}`
+    });
+  }
+});
+
+app.get('/api/ai-dashboard-summary/:symbol', async (req, res) => {
+  const symbol = normalizeDashboardSymbol(req.params.symbol);
+  if (!symbol) {
+    return res.status(400).json({ ok: false, error: "Invalid symbol" });
+  }
+
+  try {
+    const response = await axios.get(`${AI_DASHBOARD_BASE_URL}/api/dashboard`, {
+      params: {
+        symbol,
+        timeframe: String(req.query.timeframe || "D"),
+        refresh: req.query.refresh === "1" || req.query.refresh === "true" ? "true" : "false"
+      },
+      timeout: 12000
+    });
+    res.json(compactAiDashboardSummary(response.data, symbol));
+  } catch (error) {
+    const status = error.response?.status || 502;
+    res.status(status).json({
+      ok: false,
+      symbol,
+      error: serviceErrorMessage(error)
     });
   }
 });
