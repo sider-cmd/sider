@@ -296,6 +296,15 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
 .decision-score.bad { color: var(--up); background: rgba(248,81,73,0.10); border-color: rgba(248,81,73,0.28); }
 .decision-score.na { color: var(--text-muted); background: rgba(148,163,184,0.10); }
 .decision-stack { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.ai-dashboard-cell { min-width: 180px; max-width: 260px; white-space: normal; text-align: left; }
+.ai-dashboard-summary { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 160px; }
+.ai-dashboard-head { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ai-dashboard-signal { display: inline-flex; align-items: center; justify-content: center; min-width: 54px; border-radius: 999px; padding: 3px 7px; font-size: 12px; font-weight: 800; border: 1px solid rgba(91,158,255,0.28); color: var(--accent); background: rgba(91,158,255,0.10); }
+.ai-dashboard-signal.good { color: var(--down); border-color: rgba(52,211,153,0.30); background: rgba(52,211,153,0.10); }
+.ai-dashboard-signal.warn { color: var(--warn); border-color: rgba(251,191,36,0.30); background: rgba(251,191,36,0.10); }
+.ai-dashboard-signal.bad { color: var(--up); border-color: rgba(248,81,73,0.30); background: rgba(248,81,73,0.10); }
+.ai-dashboard-link { color: var(--accent); text-decoration: none; font-size: 11px; font-weight: 700; }
+.ai-dashboard-line { color: var(--text-muted); font-size: 11px; line-height: 1.35; }
 .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
 .health-tile { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; min-height: 92px; }
 .health-tile.ok { border-color: rgba(34,197,94,0.28); background: rgba(34,197,94,0.07); }
@@ -462,6 +471,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
             <th class="right">損益</th><th class="right">報酬率</th>
             <th class="right">建議</th>
             <th class="right">決策分數</th>
+            <th>AI</th>
             <th></th>
           </tr></thead>
           <tbody id="holdings-tbody"></tbody>
@@ -921,6 +931,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   let isSyncing = false;
   let saveDebounceTimer = null;
   let allowSnapshotOverwriteOnce = false;
+  const aiDashboardCache = new Map();
+  let aiDashboardRenderToken = 0;
 
   function normalizeExcludedSymbols(raw) {
     const normalized = { ...DEFAULT_EXCLUDED_SYMBOLS };
@@ -1563,6 +1575,75 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     }).join('');
   }
 
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[char]));
+  }
+
+  function aiDashboardSignalClass(summary) {
+    const risk = Number(summary?.risk);
+    const signal = String(summary?.signal || summary?.headline || '');
+    if (risk >= 65 || /賣|空|減|弱|停損|風險/.test(signal)) return 'bad';
+    if (risk >= 40 || /觀望|震盪|警|保守/.test(signal)) return 'warn';
+    if (/買|多|強|健康|持有/.test(signal)) return 'good';
+    return '';
+  }
+
+  function renderAiDashboardCell(summary) {
+    if (!summary) return '<span class="ai-dashboard-line">載入中</span>';
+    if (summary.error) return '<span class="ai-dashboard-line">暫無分析</span>';
+
+    const signal = summary.signal || 'AI';
+    const confidence = Number.isFinite(Number(summary.confidence)) ? `信心 ${fmtNum(summary.confidence, 0)}%` : '';
+    const risk = Number.isFinite(Number(summary.risk)) ? `風險 ${fmtNum(summary.risk, 0)}` : '';
+    const target = Number.isFinite(Number(summary.target)) ? `目標 ${fmtNum(summary.target, 2)}` : '';
+    const stop = Number.isFinite(Number(summary.stop)) ? `停損 ${fmtNum(summary.stop, 2)}` : '';
+    const meta = [confidence, risk].filter(Boolean).join(' / ');
+    const levels = [target, stop].filter(Boolean).join(' / ');
+    const title = [summary.headline, summary.strategy].filter(Boolean).join('｜');
+    return `<span class="ai-dashboard-summary" title="${escapeHtml(title)}">
+      <span class="ai-dashboard-head">
+        <span class="ai-dashboard-signal ${aiDashboardSignalClass(summary)}">${escapeHtml(signal)}</span>
+        <a class="ai-dashboard-link" href="${escapeHtml(summary.dashboardUrl || '#')}" target="_blank" rel="noopener">詳情</a>
+      </span>
+      <span class="ai-dashboard-line">${escapeHtml(meta || summary.headline || '')}</span>
+      <span class="ai-dashboard-line">${escapeHtml(levels || summary.strategy || '')}</span>
+    </span>`;
+  }
+
+  async function loadAiDashboardSummary(symbol) {
+    const cached = aiDashboardCache.get(symbol);
+    if (cached && Date.now() - cached.fetchedAt < 10 * 60 * 1000) return cached.data;
+
+    try {
+      const response = await fetch(`/api/ai-dashboard-summary/${encodeURIComponent(symbol)}?timeframe=D`);
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || 'AI dashboard unavailable');
+      aiDashboardCache.set(symbol, { data, fetchedAt: Date.now() });
+      return data;
+    } catch (error) {
+      const data = { error: error.message || 'AI dashboard unavailable' };
+      aiDashboardCache.set(symbol, { data, fetchedAt: Date.now() });
+      return data;
+    }
+  }
+
+  async function hydrateAiDashboardSummaries(symbols) {
+    const token = ++aiDashboardRenderToken;
+    const uniqueSymbols = [...new Set(symbols.filter(Boolean))];
+    await Promise.all(uniqueSymbols.map(async symbol => {
+      const summary = await loadAiDashboardSummary(symbol);
+      if (token !== aiDashboardRenderToken) return;
+      const cell = document.querySelector(`[data-ai-symbol="${CSS.escape(symbol)}"]`);
+      if (cell) cell.innerHTML = renderAiDashboardCell(summary);
+    }));
+  }
+
   function renderHoldings() {
     const hs = activeHoldings().filter(h => h.shares > 0);
     if (hs.length === 0) { $('holdings-empty').style.display = 'block'; $('holdings-wrap').style.display = 'none'; return; }
@@ -1602,9 +1683,11 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         <td class="right ${plClass(pl)}">${fmtPct(plPct)}</td>
         <td class="right"><span class="action-cell"><span class="action-badge ${action.className}">${action.label}</span><span class="dim" style="font-size:10px;">${action.shortReason}</span></span></td>
         <td class="right"><span class="decision-stack"><span class="decision-score ${decision.className}">${decision.label}</span><span class="dim" style="font-size:10px;">${decision.shortReason}</span></span></td>
+        <td class="ai-dashboard-cell" data-ai-symbol="${h.symbol}">${renderAiDashboardCell(aiDashboardCache.get(h.symbol)?.data)}</td>
         <td class="right"><button class="btn btn-sm btn-ghost set-price" data-symbol="${h.symbol}">手動</button></td>
       </tr>`;
     }).join('');
+    hydrateAiDashboardSummaries(hs.map(h => h.symbol));
     document.querySelectorAll('.set-price').forEach(b => b.addEventListener('click', () => openPriceEditor(b.dataset.symbol)));
   }
 
