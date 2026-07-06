@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-06 BUTLER-WEB-API-1";
+const BOT_BUILD_VERSION = "2026-07-06 BUTLER-WEB-API-2";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -2930,9 +2930,20 @@ const buildLineAgentReplies = async (text, ownerKey) => {
 
   const replies = [];
   for (const intent of intents) {
-    rememberLineAgentInteraction(ownerKey, intent);
-    const reply = await buildLineAgentReply(intent, ownerKey);
-    if (reply) replies.push(reply);
+    try {
+      rememberLineAgentInteraction(ownerKey, intent);
+      const reply = await buildLineAgentReply(intent, ownerKey);
+      if (reply) replies.push(reply);
+    } catch (error) {
+      const message = serviceErrorMessage(error);
+      console.error("LINE agent intent failed", {
+        ownerKey,
+        intentType: intent.type,
+        input: intent.input,
+        error: message
+      });
+      replies.push(`管家指令失敗：${intent.type}\n原因：${message || "未知錯誤"}\n\n請稍後重試，或先改用單一句指令。`);
+    }
   }
   return {
     ok: true,
