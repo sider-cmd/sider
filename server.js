@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-06 BUTLER-WEB-API-2";
+const BOT_BUILD_VERSION = "2026-07-06 BUTLER-WEB-API-3";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -4652,10 +4652,10 @@ if (marketInput === "每日籌碼推送") {
   }
 }
 
-const resolveStockCode = (input) => {
-  const normalized = input.trim();
+function resolveStockCode(input) {
+  const normalized = String(input || "").trim();
   return reverseStockNames[normalized] || normalized;
-};
+}
 
 const fetchYahooQuote = async (code, timeoutMs = 5000) => {
   const cached = quoteCache.get(code);
