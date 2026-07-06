@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-06 BUTLER-WEB-API-3";
+const BOT_BUILD_VERSION = "2026-07-06 BUTLER-WEB-API-4";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -2246,6 +2246,35 @@ const normalizeButlerReminders = (value = []) =>
     .filter((item) => item && item.id && item.dueAt)
     .slice(-50);
 
+const lineAgentStockNames = {
+  "1301": "台塑",
+  "1303": "南亞",
+  "2002": "中鋼",
+  "2303": "聯電",
+  "2308": "台達電",
+  "2317": "鴻海",
+  "2330": "台積電",
+  "2382": "廣達",
+  "2412": "中華電",
+  "2454": "聯發科",
+  "2603": "長榮",
+  "2618": "長榮航",
+  "2881": "富邦金",
+  "2882": "國泰金",
+  "2891": "中信金",
+  "3008": "大立光",
+  "3552": "同致"
+};
+
+const lineAgentReverseStockNames = Object.fromEntries(
+  Object.entries(lineAgentStockNames).map(([code, name]) => [name, code])
+);
+
+const resolveLineAgentStockCode = (input) => {
+  const normalized = String(input || "").trim();
+  return lineAgentReverseStockNames[normalized] || normalized;
+};
+
 const hydrateButlerCloudState = async (ownerKey) => {
   if (!ownerKey || lineButlerCloudLoaded.has(ownerKey)) return;
   lineButlerCloudLoaded.add(ownerKey);
@@ -2527,7 +2556,7 @@ const rememberLineAgentInteraction = (ownerKey, intent) => {
   saved.updatedAt = new Date().toISOString();
   saved.counts[intent.type] = (saved.counts[intent.type] || 0) + 1;
   if (intent.input) {
-    const code = resolveStockCode(intent.input);
+    const code = resolveLineAgentStockCode(intent.input);
     if (/^\d{4,6}$/.test(code)) {
       saved.symbols[code] = (saved.symbols[code] || 0) + 1;
     }
@@ -2575,7 +2604,7 @@ const buildLineAgentMemoryReport = async (ownerKey) => {
   const symbolRows = Object.entries(saved.symbols)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5)
-    .map(([code, count], index) => `${index + 1}. ${stockLabel(code, stockNames[code])}：${count} 次`);
+    .map(([code, count], index) => `${index + 1}. ${stockLabel(code, lineAgentStockNames[code])}：${count} 次`);
   const recentRows = saved.recent
     .slice(0, 5)
     .map((item, index) => `${index + 1}. ${lineAgentIntentLabel(item.type)}${item.input ? ` ${item.input}` : ""}`);
@@ -2826,7 +2855,7 @@ ${lineAgentText.safeNotice}`);
 };
 
 const buildLineAgentStockAnalysis = async (ownerKey, stockInput) => {
-  const code = resolveStockCode(stockInput);
+  const code = resolveLineAgentStockCode(stockInput);
   if (!/^\d{4,6}$/.test(code)) {
     return lineAgentText.stockNotFound;
   }
@@ -2837,7 +2866,7 @@ const buildLineAgentStockAnalysis = async (ownerKey, stockInput) => {
     getPortfolio(ownerKey).catch(() => new Map())
   ]);
   if (!quote && !dashboard) {
-    return `目前查不到 ${stockLabel(code, stockNames[code])} 的行情或 AI 分析資料。`;
+    return `目前查不到 ${stockLabel(code, lineAgentStockNames[code])} 的行情或 AI 分析資料。`;
   }
 
   const position = portfolio.get(code);
@@ -2875,7 +2904,7 @@ const buildLineAgentStockAnalysis = async (ownerKey, stockInput) => {
       ? "留意追高"
       : "觀望");
 
-  return toLineSafeText(`AI 個股分析：${stockLabel(code, stockNames[code])}
+  return toLineSafeText(`AI 個股分析：${stockLabel(code, lineAgentStockNames[code])}
 
 結論：${action}
 現價：${formatLineAgentPrice(price)}
