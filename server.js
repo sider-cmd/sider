@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-06 LINE-AI-ASSISTANT-2";
+const BOT_BUILD_VERSION = "2026-07-06 LINE-AI-BUTLER-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -45,6 +45,8 @@ const dailyReportSettings = new Map();
 const dailyChipMovementPushLog = new Set();
 const linePushCooldownLog = new Map();
 const lineAgentInteractionMemory = new Map();
+const lineButlerLifeMemory = new Map();
+const lineButlerReminders = new Map();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -2086,7 +2088,7 @@ const toLineSafeText = (text, limit = 4800) => {
 };
 
 const lineAgentText = {
-  help: `AI 股票助理
+  help: `AI 個人管家
 
 你可以直接在 LINE 輸入：
 1. 今日報告
@@ -2096,15 +2098,23 @@ const lineAgentText = {
 5. 助理狀態
 6. 助理記憶
 7. 助理建議
+8. 找資料 AI Agent
+9. 鬧鐘 07:30 起床
+10. 提醒 30分鐘 喝水
+11. 起床 07:10
+12. 睡覺 23:50
+13. 作息紀錄
+14. 鬧鐘列表
 
 安全規則：
 - 我只做分析與建議，不會自動買賣股票。
 - 我不會刪除資料。
 - 資料不足時會明講，不硬猜。
 - 買進、續抱、減碼、賣出都只會用「建議」形式呈現。
+- 鬧鐘與作息目前是管家輕量記憶，服務重啟後會重新累積；要永久保存需加 Supabase 記憶表。
 
 建議用法：
-早上問「今日報告」，盤中問「分析 股票代號」，收盤後問「持股健檢」或「風險排行」。`,
+早上記「起床」，盤中問「分析 股票代號」，晚上記「睡覺」，需要查東西就輸入「找資料 關鍵字」。`,
   noPortfolio: "目前沒有持股資料，請先同步網頁資產表或輸入「匯入持股」。",
   stockNotFound: "找不到這支股票，請輸入股票代號，例如：分析 2330。",
   safeNotice: "提醒：這是 AI 風險分析與決策輔助，不是自動交易指令；買賣前請自行確認資金、風險與最新資訊。"
@@ -2114,9 +2124,9 @@ const lineAgentProfile = {
   owner: "個人使用",
   market: "台股",
   primaryInterface: "LINE 手機",
-  style: "穩健、重視配息、資產管理與 AI 輔助決策",
+  style: "個人管家、穩健投資、重視配息、作息紀錄與 AI 輔助決策",
   forbiddenActions: ["刪除資料", "自動買賣股票", "操作券商帳戶"],
-  dataSources: ["LINE 持股資料", "交易紀錄", "股利紀錄", "Yahoo 報價", "AI dashboard", "FinMind 籌碼資料"]
+  dataSources: ["LINE 持股資料", "交易紀錄", "股利紀錄", "Yahoo 報價", "AI dashboard", "FinMind 籌碼資料", "Google News RSS"]
 };
 
 const normalizeLineAgentCommand = (text) =>
@@ -2147,6 +2157,32 @@ const parseLineAgentIntent = (text) => {
   if (/^(助理建議|下一步|下一步建議|AI建議)$/i.test(input)) {
     return { type: "assistantSuggestions" };
   }
+  if (/^(管家|個人管家|管家功能|生活管家)$/i.test(input)) {
+    return { type: "butlerHelp" };
+  }
+  if (/^(作息紀錄|睡眠紀錄|生活紀錄|起床睡覺紀錄)$/i.test(input)) {
+    return { type: "lifeLog" };
+  }
+  if (/^(鬧鐘列表|提醒列表|我的鬧鐘|我的提醒)$/i.test(input)) {
+    return { type: "reminderList" };
+  }
+
+  const wakeMatch = input.match(/^(?:起床|記起床|我起床了)(?:\s+(.+))?$/i);
+  if (wakeMatch) {
+    return { type: "wakeLog", input: wakeMatch[1] || "" };
+  }
+  const sleepMatch = input.match(/^(?:睡覺|記睡覺|我睡了|我要睡了)(?:\s+(.+))?$/i);
+  if (sleepMatch) {
+    return { type: "sleepLog", input: sleepMatch[1] || "" };
+  }
+  const reminderMatch = input.match(/^(?:鬧鐘|提醒|提醒我)\s+(.+)$/i);
+  if (reminderMatch) {
+    return { type: "setReminder", input: reminderMatch[1] };
+  }
+  const searchMatch = input.match(/^(?:找資料|查資料|搜尋|幫我查)\s+(.+)$/i);
+  if (searchMatch) {
+    return { type: "searchInfo", input: searchMatch[1] };
+  }
 
   const analysisMatch = input.match(/^(?:分析|AI分析|助理分析)\s*([0-9A-Za-z]{4,6}|\S+)$/i);
   if (analysisMatch) {
@@ -2164,6 +2200,243 @@ const formatLineAgentPercent = (value) =>
 
 const formatLineAgentPrice = (value) =>
   Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)} 元` : "資料不足";
+
+const getButlerMemory = (ownerKey) => {
+  const saved =
+    lineButlerLifeMemory.get(ownerKey) || {
+      wakeLogs: [],
+      sleepLogs: [],
+      searches: []
+    };
+  lineButlerLifeMemory.set(ownerKey, saved);
+  return saved;
+};
+
+const taipeiDateParts = (date = new Date()) => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(date);
+  const pick = (type) => parts.find((part) => part.type === type)?.value;
+  return {
+    year: pick("year"),
+    month: pick("month"),
+    day: pick("day"),
+    hour: pick("hour"),
+    minute: pick("minute"),
+    dateKey: `${pick("year")}-${pick("month")}-${pick("day")}`,
+    timeKey: `${pick("hour")}:${pick("minute")}`
+  };
+};
+
+const parseButlerClock = (text) => {
+  const value = String(text || "").trim();
+  if (!value || /^(現在|now)$/i.test(value)) {
+    return new Date();
+  }
+  const clock = value.match(/^(\d{1,2})[:：](\d{1,2})$/);
+  if (!clock) return null;
+
+  const hour = Number(clock[1]);
+  const minute = Number(clock[2]);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+
+  const now = new Date();
+  const parts = taipeiDateParts(now);
+  const utc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), hour - 8, minute, 0);
+  return new Date(utc);
+};
+
+const parseButlerReminder = (input) => {
+  const text = String(input || "").trim();
+  const relative = text.match(/^(\d+)\s*(分鐘|分|小時|時|天)\s*(.*)$/);
+  if (relative) {
+    const amount = Number(relative[1]);
+    const unit = relative[2];
+    const title = relative[3].trim() || "提醒";
+    const multiplier =
+      unit === "分鐘" || unit === "分"
+        ? 60 * 1000
+        : unit === "小時" || unit === "時"
+        ? 60 * 60 * 1000
+        : 24 * 60 * 60 * 1000;
+    return {
+      dueAt: new Date(Date.now() + amount * multiplier),
+      title
+    };
+  }
+
+  const absolute = text.match(/^(?:(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s+)?(\d{1,2})[:：](\d{1,2})(?:\s+(.+))?$/);
+  if (absolute) {
+    const now = new Date();
+    const parts = taipeiDateParts(now);
+    const year = Number(absolute[1] || parts.year);
+    const month = Number(absolute[2] || parts.month);
+    const day = Number(absolute[3] || parts.day);
+    const hour = Number(absolute[4]);
+    const minute = Number(absolute[5]);
+    const title = (absolute[6] || "提醒").trim();
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+    let dueAt = new Date(Date.UTC(year, month - 1, day, hour - 8, minute, 0));
+    if (!absolute[1] && dueAt.getTime() <= Date.now()) {
+      dueAt = new Date(dueAt.getTime() + 24 * 60 * 60 * 1000);
+    }
+    return { dueAt, title };
+  }
+
+  return null;
+};
+
+const butlerTimeText = (date) =>
+  new Date(date).toLocaleString("zh-TW", {
+    timeZone: "Asia/Taipei",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
+
+const recordButlerLifeEvent = (ownerKey, type, input) => {
+  const memory = getButlerMemory(ownerKey);
+  const time = parseButlerClock(input);
+  if (!time) {
+    return `時間格式看不懂。請用：${type === "wake" ? "起床 07:10" : "睡覺 23:50"}，或直接輸入「${type === "wake" ? "起床" : "睡覺"}」記錄現在。`;
+  }
+  const row = {
+    at: time.toISOString(),
+    dateKey: taipeiDateParts(time).dateKey
+  };
+  const target = type === "wake" ? memory.wakeLogs : memory.sleepLogs;
+  target.unshift(row);
+  target.splice(30);
+
+  const label = type === "wake" ? "起床" : "睡覺";
+  const opposite =
+    type === "wake"
+      ? memory.sleepLogs.find((item) => item.dateKey === row.dateKey)
+      : memory.wakeLogs.find((item) => item.dateKey === row.dateKey);
+  const sleepHint =
+    opposite && type === "wake"
+      ? `\n昨晚/今日睡眠參考：睡覺 ${butlerTimeText(opposite.at)}，起床 ${butlerTimeText(row.at)}`
+      : opposite
+      ? `\n今日作息參考：起床 ${butlerTimeText(opposite.at)}，睡覺 ${butlerTimeText(row.at)}`
+      : "";
+
+  return `已記錄${label}時間：${butlerTimeText(row.at)}${sleepHint}\n\n輸入「作息紀錄」可查看最近紀錄。`;
+};
+
+const buildButlerLifeLog = (ownerKey) => {
+  const memory = getButlerMemory(ownerKey);
+  const wakeRows = memory.wakeLogs
+    .slice(0, 5)
+    .map((item, index) => `${index + 1}. ${butlerTimeText(item.at)}`);
+  const sleepRows = memory.sleepLogs
+    .slice(0, 5)
+    .map((item, index) => `${index + 1}. ${butlerTimeText(item.at)}`);
+
+  return `作息紀錄
+
+最近起床
+${wakeRows.length ? wakeRows.join("\n") : "尚未記錄"}
+
+最近睡覺
+${sleepRows.length ? sleepRows.join("\n") : "尚未記錄"}
+
+可用指令：
+起床 07:10
+睡覺 23:50
+起床
+睡覺
+
+提醒：目前是管家輕量記憶，服務重啟後會重新累積；若要永久保存，我下一步會加 Supabase 記憶表。`;
+};
+
+const addButlerReminder = (ownerKey, input) => {
+  const parsed = parseButlerReminder(input);
+  if (!parsed || !parsed.dueAt || parsed.dueAt.getTime() <= Date.now()) {
+    return "鬧鐘格式看不懂。請用：鬧鐘 07:30 起床，或：提醒 30分鐘 喝水。";
+  }
+  const rows = lineButlerReminders.get(ownerKey) || [];
+  const reminder = {
+    id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    title: parsed.title,
+    dueAt: parsed.dueAt.toISOString(),
+    createdAt: new Date().toISOString(),
+    sent: false
+  };
+  rows.push(reminder);
+  rows.sort((a, b) => new Date(a.dueAt) - new Date(b.dueAt));
+  lineButlerReminders.set(ownerKey, rows.slice(-50));
+
+  return `已設定提醒
+時間：${butlerTimeText(reminder.dueAt)}
+內容：${reminder.title}
+
+輸入「鬧鐘列表」可查看。`;
+};
+
+const buildButlerReminderList = (ownerKey) => {
+  const rows = (lineButlerReminders.get(ownerKey) || [])
+    .filter((item) => !item.sent && new Date(item.dueAt).getTime() > Date.now())
+    .sort((a, b) => new Date(a.dueAt) - new Date(b.dueAt))
+    .slice(0, 10);
+  if (rows.length === 0) {
+    return "目前沒有待提醒的鬧鐘。\n\n可輸入：鬧鐘 07:30 起床\n或：提醒 30分鐘 喝水";
+  }
+  return `鬧鐘列表
+
+${rows.map((item, index) => `${index + 1}. ${butlerTimeText(item.dueAt)}｜${item.title}`).join("\n")}`;
+};
+
+const buildButlerSearchReport = async (ownerKey, query) => {
+  const keyword = String(query || "").trim();
+  if (!keyword) return "請輸入要找的資料，例如：找資料 AI Agent 架構。";
+
+  const memory = getButlerMemory(ownerKey);
+  memory.searches.unshift({ query: keyword, at: new Date().toISOString() });
+  memory.searches.splice(20);
+
+  const response = await axios.get("https://news.google.com/rss/search", {
+    params: {
+      q: keyword,
+      hl: "zh-TW",
+      gl: "TW",
+      ceid: "TW:zh-Hant"
+    },
+    timeout: 10000
+  });
+  const $ = cheerio.load(response.data, { xmlMode: true });
+  const items = $("item")
+    .slice(0, 5)
+    .map((_, item) => ({
+      title: $(item).find("title").text().trim(),
+      source: $(item).find("source").text().trim(),
+      link: $(item).find("link").text().trim()
+    }))
+    .get();
+
+  if (items.length === 0) {
+    return `找不到「${keyword}」的近期資料。你可以換更精準的關鍵字。`;
+  }
+
+  return toLineSafeText(`我幫你找到這些資料：${keyword}
+
+${items
+  .map(
+    (item, index) => `${index + 1}. ${item.title}
+來源：${item.source || "Google News"}
+${item.link}`
+  )
+  .join("\n\n")}
+
+你可以接著問：「整理 ${keyword}」或「找資料 更精準的關鍵字」。`);
+};
 
 const rememberLineAgentInteraction = (ownerKey, intent) => {
   if (!ownerKey || !intent) return;
@@ -2205,6 +2478,8 @@ const lineAgentIntentLabel = (type) =>
 
 const buildLineAgentMemoryReport = async (ownerKey) => {
   const saved = lineAgentInteractionMemory.get(ownerKey);
+  const life = getButlerMemory(ownerKey);
+  const reminders = (lineButlerReminders.get(ownerKey) || []).filter((item) => !item.sent);
   if (!saved || saved.recent.length === 0) {
     return `AI 助理記憶
 
@@ -2214,6 +2489,8 @@ const buildLineAgentMemoryReport = async (ownerKey) => {
 1. 最近使用的 AI 指令
 2. 常查股票代號
 3. 你偏好看今日報告、持股健檢或風險排行
+4. 起床與睡覺時間
+5. 待提醒鬧鐘
 
 注意：目前是輕量記憶，服務重啟後會重新累積；不會記錄 LINE token 或任何密鑰。`;
   }
@@ -2242,6 +2519,12 @@ ${symbolRows.length ? symbolRows.join("\n") : "尚未累積個股查詢"}
 使用偏好
 ${countRows.join("\n")}
 
+生活管家
+最近起床：${life.wakeLogs[0] ? butlerTimeText(life.wakeLogs[0].at) : "尚未記錄"}
+最近睡覺：${life.sleepLogs[0] ? butlerTimeText(life.sleepLogs[0].at) : "尚未記錄"}
+待提醒：${reminders.length} 筆
+最近查資料：${life.searches[0]?.query || "尚未查詢"}
+
 我會用這些輕量記憶，優先幫你看常問股票、持股風險與報告節奏。
 ${lineAgentText.safeNotice}`);
 };
@@ -2250,6 +2533,8 @@ const buildLineAgentStatus = async (ownerKey) => {
   const diagnostics = await buildSystemDiagnostics();
   const portfolio = await getPortfolio(ownerKey);
   const memory = lineAgentInteractionMemory.get(ownerKey);
+  const life = getButlerMemory(ownerKey);
+  const reminders = (lineButlerReminders.get(ownerKey) || []).filter((item) => !item.sent);
   const warnings = diagnostics.warnings?.length ? diagnostics.warnings.join("；") : "無";
 
   return toLineSafeText(`AI 助理狀態
@@ -2273,11 +2558,16 @@ AI dashboard：已接入 /api/ai-dashboard-summary/:symbol
 4. 個股 AI 分析
 5. 最近查詢記憶
 6. 助理下一步建議
+7. 查資料
+8. 鬧鐘/提醒
+9. 起床與睡眠時間紀錄
 
 安全邊界
 ${lineAgentProfile.forbiddenActions.map((item, index) => `${index + 1}. 不${item}`).join("\n")}
 
 記憶狀態：${memory?.recent?.length ? `已累積 ${memory.recent.length} 筆最近查詢` : "尚未累積"}
+作息狀態：起床 ${life.wakeLogs.length} 筆｜睡覺 ${life.sleepLogs.length} 筆
+提醒狀態：待提醒 ${reminders.length} 筆
 提醒：${warnings}`);
 };
 
@@ -2536,6 +2826,13 @@ const buildLineAgentReply = async (intent, ownerKey) => {
   if (intent.type === "assistantStatus") return buildLineAgentStatus(ownerKey);
   if (intent.type === "assistantMemory") return buildLineAgentMemoryReport(ownerKey);
   if (intent.type === "assistantSuggestions") return buildLineAgentSuggestions(ownerKey);
+  if (intent.type === "butlerHelp") return lineAgentText.help;
+  if (intent.type === "wakeLog") return recordButlerLifeEvent(ownerKey, "wake", intent.input);
+  if (intent.type === "sleepLog") return recordButlerLifeEvent(ownerKey, "sleep", intent.input);
+  if (intent.type === "lifeLog") return buildButlerLifeLog(ownerKey);
+  if (intent.type === "setReminder") return addButlerReminder(ownerKey, intent.input);
+  if (intent.type === "reminderList") return buildButlerReminderList(ownerKey);
+  if (intent.type === "searchInfo") return buildButlerSearchReport(ownerKey, intent.input);
   if (intent.type === "stockAnalysis") return buildLineAgentStockAnalysis(ownerKey, intent.input);
   return null;
 };
@@ -8823,8 +9120,40 @@ app.get('*', (req, res) => {
 // =================【4. 啟動伺服器】=================
 const PORT = process.env.PORT || 8080;
 const WEB_CLOUD_REPAIR_INTERVAL_MS = Number(process.env.WEB_CLOUD_REPAIR_INTERVAL_MS || 10 * 60 * 1000);
+const BUTLER_REMINDER_INTERVAL_MS = Number(process.env.BUTLER_REMINDER_INTERVAL_MS || 30 * 1000);
+
+const checkAndPushButlerReminders = async () => {
+  const now = Date.now();
+  const pushes = [];
+  for (const [ownerKey, rows] of lineButlerReminders.entries()) {
+    for (const reminder of rows) {
+      if (reminder.sent || new Date(reminder.dueAt).getTime() > now) continue;
+      reminder.sent = true;
+      reminder.sentAt = new Date().toISOString();
+      pushes.push(
+        client.pushMessage(ownerKey, {
+          type: "text",
+          text: `管家提醒\n\n時間：${butlerTimeText(reminder.dueAt)}\n內容：${reminder.title}`
+        })
+      );
+    }
+    lineButlerReminders.set(
+      ownerKey,
+      rows.filter((item) => !item.sent || Date.now() - new Date(item.sentAt || item.dueAt).getTime() < 24 * 60 * 60 * 1000)
+    );
+  }
+  await Promise.all(pushes);
+  return pushes.length;
+};
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`LINE butler reminders enabled. Interval: ${Math.round(BUTLER_REMINDER_INTERVAL_MS / 1000)} seconds`);
+  setInterval(() => {
+    checkAndPushButlerReminders().catch((error) => {
+      console.error("LINE butler reminder schedule failed:", error);
+    });
+  }, BUTLER_REMINDER_INTERVAL_MS);
   if (hasPortfolioDb) {
     console.log(
       `Auto price alerts enabled. Interval: ${Math.round(
