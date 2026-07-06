@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-06 LINE-AI-BUTLER-1";
+const BOT_BUILD_VERSION = "2026-07-06 LINE-AI-BUTLER-2";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -47,6 +47,7 @@ const linePushCooldownLog = new Map();
 const lineAgentInteractionMemory = new Map();
 const lineButlerLifeMemory = new Map();
 const lineButlerReminders = new Map();
+const lineButlerCloudLoaded = new Set();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -2111,7 +2112,7 @@ const lineAgentText = {
 - 我不會刪除資料。
 - 資料不足時會明講，不硬猜。
 - 買進、續抱、減碼、賣出都只會用「建議」形式呈現。
-- 鬧鐘與作息目前是管家輕量記憶，服務重啟後會重新累積；要永久保存需加 Supabase 記憶表。
+- 鬧鐘、作息、查資料與最近查詢會保存到管家記憶。
 
 建議用法：
 早上記「起床」，盤中問「分析 股票代號」，晚上記「睡覺」，需要查東西就輸入「找資料 關鍵字」。`,
@@ -2192,6 +2193,21 @@ const parseLineAgentIntent = (text) => {
   return null;
 };
 
+const parseLineAgentIntents = (text) => {
+  const input = String(text || "").trim();
+  const parts = input
+    .split(/[\n。；;]+|(?<=\S)\.(?=\S)/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length > 1) {
+    const intents = parts.map(parseLineAgentIntent).filter(Boolean);
+    return intents.length === parts.length ? intents : [];
+  }
+
+  const direct = parseLineAgentIntent(input);
+  return direct ? [direct] : [];
+};
+
 const formatLineAgentMoney = (value) =>
   Number.isFinite(Number(value)) ? `${formatMoney(value)} 元` : "資料不足";
 
@@ -2210,6 +2226,67 @@ const getButlerMemory = (ownerKey) => {
     };
   lineButlerLifeMemory.set(ownerKey, saved);
   return saved;
+};
+
+const normalizeButlerLifeMemory = (value = {}) => ({
+  wakeLogs: Array.isArray(value.wakeLogs) ? value.wakeLogs.slice(0, 30) : [],
+  sleepLogs: Array.isArray(value.sleepLogs) ? value.sleepLogs.slice(0, 30) : [],
+  searches: Array.isArray(value.searches) ? value.searches.slice(0, 20) : []
+});
+
+const normalizeButlerAgentMemory = (value = {}) => ({
+  updatedAt: value.updatedAt || null,
+  counts: value.counts && typeof value.counts === "object" ? value.counts : {},
+  recent: Array.isArray(value.recent) ? value.recent.slice(0, 8) : [],
+  symbols: value.symbols && typeof value.symbols === "object" ? value.symbols : {}
+});
+
+const normalizeButlerReminders = (value = []) =>
+  (Array.isArray(value) ? value : [])
+    .filter((item) => item && item.id && item.dueAt)
+    .slice(-50);
+
+const hydrateButlerCloudState = async (ownerKey) => {
+  if (!ownerKey || lineButlerCloudLoaded.has(ownerKey)) return;
+  lineButlerCloudLoaded.add(ownerKey);
+  try {
+    const state = await getSupabaseWebCloudState(ownerKey).catch(() => null);
+    const butler = state?.__butler || {};
+    if (butler.life) {
+      lineButlerLifeMemory.set(ownerKey, normalizeButlerLifeMemory(butler.life));
+    }
+    if (butler.agentMemory) {
+      lineAgentInteractionMemory.set(ownerKey, normalizeButlerAgentMemory(butler.agentMemory));
+    }
+    if (butler.reminders) {
+      lineButlerReminders.set(ownerKey, normalizeButlerReminders(butler.reminders));
+    }
+  } catch (error) {
+    console.warn(`Butler cloud memory load failed: ${serviceErrorMessage(error)}`);
+  }
+};
+
+const saveButlerCloudState = async (ownerKey) => {
+  if (!ownerKey || !hasPortfolioDb) return false;
+  try {
+    const existingState = (await getSupabaseWebCloudState(ownerKey).catch(() => null)) || {};
+    const nextState = {
+      ...existingState,
+      __butler: {
+        ...(existingState.__butler || {}),
+        life: normalizeButlerLifeMemory(getButlerMemory(ownerKey)),
+        agentMemory: normalizeButlerAgentMemory(lineAgentInteractionMemory.get(ownerKey) || {}),
+        reminders: normalizeButlerReminders(lineButlerReminders.get(ownerKey) || []),
+        updatedAt: new Date().toISOString()
+      },
+      _updatedAt: Date.now()
+    };
+    await saveSupabaseWebCloudState(ownerKey, nextState);
+    return true;
+  } catch (error) {
+    console.warn(`Butler cloud memory save failed: ${serviceErrorMessage(error)}`);
+    return false;
+  }
 };
 
 const taipeiDateParts = (date = new Date()) => {
@@ -2354,7 +2431,7 @@ ${sleepRows.length ? sleepRows.join("\n") : "尚未記錄"}
 起床
 睡覺
 
-提醒：目前是管家輕量記憶，服務重啟後會重新累積；若要永久保存，我下一步會加 Supabase 記憶表。`;
+提醒：作息與鬧鐘會保存到管家記憶。`;
 };
 
 const addButlerReminder = (ownerKey, input) => {
@@ -2819,22 +2896,26 @@ ${lineAgentText.safeNotice}`);
 
 const buildLineAgentReply = async (intent, ownerKey) => {
   if (!intent) return null;
-  if (intent.type === "help") return lineAgentText.help;
-  if (intent.type === "dailyReport") return buildDailyAutoPortfolioReport(ownerKey);
-  if (intent.type === "portfolioHealth") return buildLineAgentPortfolioHealth(ownerKey);
-  if (intent.type === "riskRanking") return buildLineAgentRiskRanking(ownerKey);
-  if (intent.type === "assistantStatus") return buildLineAgentStatus(ownerKey);
-  if (intent.type === "assistantMemory") return buildLineAgentMemoryReport(ownerKey);
-  if (intent.type === "assistantSuggestions") return buildLineAgentSuggestions(ownerKey);
-  if (intent.type === "butlerHelp") return lineAgentText.help;
-  if (intent.type === "wakeLog") return recordButlerLifeEvent(ownerKey, "wake", intent.input);
-  if (intent.type === "sleepLog") return recordButlerLifeEvent(ownerKey, "sleep", intent.input);
-  if (intent.type === "lifeLog") return buildButlerLifeLog(ownerKey);
-  if (intent.type === "setReminder") return addButlerReminder(ownerKey, intent.input);
-  if (intent.type === "reminderList") return buildButlerReminderList(ownerKey);
-  if (intent.type === "searchInfo") return buildButlerSearchReport(ownerKey, intent.input);
-  if (intent.type === "stockAnalysis") return buildLineAgentStockAnalysis(ownerKey, intent.input);
-  return null;
+  await hydrateButlerCloudState(ownerKey);
+  let reply = null;
+  if (intent.type === "help") reply = lineAgentText.help;
+  else if (intent.type === "dailyReport") reply = await buildDailyAutoPortfolioReport(ownerKey);
+  else if (intent.type === "portfolioHealth") reply = await buildLineAgentPortfolioHealth(ownerKey);
+  else if (intent.type === "riskRanking") reply = await buildLineAgentRiskRanking(ownerKey);
+  else if (intent.type === "assistantStatus") reply = await buildLineAgentStatus(ownerKey);
+  else if (intent.type === "assistantMemory") reply = await buildLineAgentMemoryReport(ownerKey);
+  else if (intent.type === "assistantSuggestions") reply = await buildLineAgentSuggestions(ownerKey);
+  else if (intent.type === "butlerHelp") reply = lineAgentText.help;
+  else if (intent.type === "wakeLog") reply = recordButlerLifeEvent(ownerKey, "wake", intent.input);
+  else if (intent.type === "sleepLog") reply = recordButlerLifeEvent(ownerKey, "sleep", intent.input);
+  else if (intent.type === "lifeLog") reply = buildButlerLifeLog(ownerKey);
+  else if (intent.type === "setReminder") reply = addButlerReminder(ownerKey, intent.input);
+  else if (intent.type === "reminderList") reply = buildButlerReminderList(ownerKey);
+  else if (intent.type === "searchInfo") reply = await buildButlerSearchReport(ownerKey, intent.input);
+  else if (intent.type === "stockAnalysis") reply = await buildLineAgentStockAnalysis(ownerKey, intent.input);
+
+  await saveButlerCloudState(ownerKey);
+  return reply;
 };
 
 const TDCC_SHAREHOLDING_URL = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5";
@@ -3864,15 +3945,19 @@ async function handleEvent(event) {
     }
   }
 
-  const lineAgentIntent = parseLineAgentIntent(marketInput);
-  if (lineAgentIntent) {
+  const lineAgentIntents = parseLineAgentIntents(marketInput);
+  if (lineAgentIntents.length > 0) {
     try {
       const ownerKey = event.source?.userId || "default";
-      rememberLineAgentInteraction(ownerKey, lineAgentIntent);
-      const replyText = await buildLineAgentReply(lineAgentIntent, ownerKey);
+      const replies = [];
+      for (const intent of lineAgentIntents) {
+        rememberLineAgentInteraction(ownerKey, intent);
+        const replyText = await buildLineAgentReply(intent, ownerKey);
+        if (replyText) replies.push(replyText);
+      }
       return client.replyMessage(event.replyToken, {
         type: "text",
-        text: toLineSafeText(replyText)
+        text: toLineSafeText(replies.join("\n\n---\n\n"))
       });
     } catch (error) {
       console.error("line agent router failed:", error);
@@ -9125,7 +9210,14 @@ const BUTLER_REMINDER_INTERVAL_MS = Number(process.env.BUTLER_REMINDER_INTERVAL_
 const checkAndPushButlerReminders = async () => {
   const now = Date.now();
   const pushes = [];
-  for (const [ownerKey, rows] of lineButlerReminders.entries()) {
+  const ownerKeys = new Set(lineButlerReminders.keys());
+  if (hasPortfolioDb) {
+    const cloudOwnerKeys = await getPortfolioOwnerKeys().catch(() => []);
+    cloudOwnerKeys.forEach((ownerKey) => ownerKeys.add(ownerKey));
+  }
+  for (const ownerKey of ownerKeys) {
+    await hydrateButlerCloudState(ownerKey);
+    const rows = lineButlerReminders.get(ownerKey) || [];
     for (const reminder of rows) {
       if (reminder.sent || new Date(reminder.dueAt).getTime() > now) continue;
       reminder.sent = true;
@@ -9141,6 +9233,7 @@ const checkAndPushButlerReminders = async () => {
       ownerKey,
       rows.filter((item) => !item.sent || Date.now() - new Date(item.sentAt || item.dueAt).getTime() < 24 * 60 * 60 * 1000)
     );
+    await saveButlerCloudState(ownerKey);
   }
   await Promise.all(pushes);
   return pushes.length;
