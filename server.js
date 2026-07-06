@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-06 LINE-AI-ASSISTANT-1";
+const BOT_BUILD_VERSION = "2026-07-06 LINE-AI-ASSISTANT-2";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -44,6 +44,7 @@ const dailyReportPushLog = new Set();
 const dailyReportSettings = new Map();
 const dailyChipMovementPushLog = new Set();
 const linePushCooldownLog = new Map();
+const lineAgentInteractionMemory = new Map();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -2092,7 +2093,9 @@ const lineAgentText = {
 2. 持股健檢
 3. 風險排行
 4. 分析 2330
-5. 看持股
+5. 助理狀態
+6. 助理記憶
+7. 助理建議
 
 安全規則：
 - 我只做分析與建議，不會自動買賣股票。
@@ -2105,6 +2108,15 @@ const lineAgentText = {
   noPortfolio: "目前沒有持股資料，請先同步網頁資產表或輸入「匯入持股」。",
   stockNotFound: "找不到這支股票，請輸入股票代號，例如：分析 2330。",
   safeNotice: "提醒：這是 AI 風險分析與決策輔助，不是自動交易指令；買賣前請自行確認資金、風險與最新資訊。"
+};
+
+const lineAgentProfile = {
+  owner: "個人使用",
+  market: "台股",
+  primaryInterface: "LINE 手機",
+  style: "穩健、重視配息、資產管理與 AI 輔助決策",
+  forbiddenActions: ["刪除資料", "自動買賣股票", "操作券商帳戶"],
+  dataSources: ["LINE 持股資料", "交易紀錄", "股利紀錄", "Yahoo 報價", "AI dashboard", "FinMind 籌碼資料"]
 };
 
 const normalizeLineAgentCommand = (text) =>
@@ -2126,6 +2138,15 @@ const parseLineAgentIntent = (text) => {
   if (/^(風險排行|風險控管|持股風險|高風險持股)$/i.test(input)) {
     return { type: "riskRanking" };
   }
+  if (/^(助理狀態|AI狀態|助理健檢|AI健檢)$/i.test(input)) {
+    return { type: "assistantStatus" };
+  }
+  if (/^(助理記憶|AI記憶|最近查詢|查詢記憶)$/i.test(input)) {
+    return { type: "assistantMemory" };
+  }
+  if (/^(助理建議|下一步|下一步建議|AI建議)$/i.test(input)) {
+    return { type: "assistantSuggestions" };
+  }
 
   const analysisMatch = input.match(/^(?:分析|AI分析|助理分析)\s*([0-9A-Za-z]{4,6}|\S+)$/i);
   if (analysisMatch) {
@@ -2143,6 +2164,172 @@ const formatLineAgentPercent = (value) =>
 
 const formatLineAgentPrice = (value) =>
   Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)} 元` : "資料不足";
+
+const rememberLineAgentInteraction = (ownerKey, intent) => {
+  if (!ownerKey || !intent) return;
+  const saved =
+    lineAgentInteractionMemory.get(ownerKey) || {
+      updatedAt: null,
+      counts: {},
+      recent: [],
+      symbols: {}
+    };
+  saved.updatedAt = new Date().toISOString();
+  saved.counts[intent.type] = (saved.counts[intent.type] || 0) + 1;
+  if (intent.input) {
+    const code = resolveStockCode(intent.input);
+    if (/^\d{4,6}$/.test(code)) {
+      saved.symbols[code] = (saved.symbols[code] || 0) + 1;
+    }
+  }
+  saved.recent.unshift({
+    type: intent.type,
+    input: intent.input || "",
+    at: saved.updatedAt
+  });
+  saved.recent = saved.recent.slice(0, 8);
+  lineAgentInteractionMemory.set(ownerKey, saved);
+};
+
+const lineAgentIntentLabel = (type) =>
+  ({
+    help: "功能查詢",
+    dailyReport: "今日報告",
+    portfolioHealth: "持股健檢",
+    riskRanking: "風險排行",
+    stockAnalysis: "個股分析",
+    assistantStatus: "助理狀態",
+    assistantMemory: "助理記憶",
+    assistantSuggestions: "助理建議"
+  }[type] || type);
+
+const buildLineAgentMemoryReport = async (ownerKey) => {
+  const saved = lineAgentInteractionMemory.get(ownerKey);
+  if (!saved || saved.recent.length === 0) {
+    return `AI 助理記憶
+
+目前這次服務啟動後還沒有可整理的 AI 助理查詢紀錄。
+
+我會開始記錄：
+1. 最近使用的 AI 指令
+2. 常查股票代號
+3. 你偏好看今日報告、持股健檢或風險排行
+
+注意：目前是輕量記憶，服務重啟後會重新累積；不會記錄 LINE token 或任何密鑰。`;
+  }
+
+  const symbolRows = Object.entries(saved.symbols)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([code, count], index) => `${index + 1}. ${stockLabel(code, stockNames[code])}：${count} 次`);
+  const recentRows = saved.recent
+    .slice(0, 5)
+    .map((item, index) => `${index + 1}. ${lineAgentIntentLabel(item.type)}${item.input ? ` ${item.input}` : ""}`);
+  const countRows = Object.entries(saved.counts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([type, count]) => `${lineAgentIntentLabel(type)}：${count} 次`);
+
+  return toLineSafeText(`AI 助理記憶
+
+最近更新：${new Date(saved.updatedAt).toLocaleString("zh-TW", { timeZone: "Asia/Taipei" })}
+
+最近查詢
+${recentRows.join("\n")}
+
+常查股票
+${symbolRows.length ? symbolRows.join("\n") : "尚未累積個股查詢"}
+
+使用偏好
+${countRows.join("\n")}
+
+我會用這些輕量記憶，優先幫你看常問股票、持股風險與報告節奏。
+${lineAgentText.safeNotice}`);
+};
+
+const buildLineAgentStatus = async (ownerKey) => {
+  const diagnostics = await buildSystemDiagnostics();
+  const portfolio = await getPortfolio(ownerKey);
+  const memory = lineAgentInteractionMemory.get(ownerKey);
+  const warnings = diagnostics.warnings?.length ? diagnostics.warnings.join("；") : "無";
+
+  return toLineSafeText(`AI 助理狀態
+
+版本：${BOT_BUILD_VERSION}
+定位：${lineAgentProfile.owner}｜${lineAgentProfile.market}｜${lineAgentProfile.primaryInterface}
+投資風格：${lineAgentProfile.style}
+
+資料健康
+系統：${diagnostics.ok ? "正常" : "需要檢查"}
+持股：${portfolio.size} 檔
+LINE 資料：持股 ${diagnostics.lineData?.holdings ?? 0}｜交易 ${diagnostics.lineData?.trades ?? 0}｜股利 ${diagnostics.lineData?.dividends ?? 0}
+雲端資料：交易 ${diagnostics.cloudData?.trades ?? 0}｜股利 ${diagnostics.cloudData?.dividends ?? 0}｜快照 ${diagnostics.cloudData?.snapshots ?? 0}
+報價：${diagnostics.checks?.quote?.ok ? `正常，2330 ${diagnostics.checks.quote.price}` : "異常"}
+AI dashboard：已接入 /api/ai-dashboard-summary/:symbol
+
+能力
+1. 今日報告
+2. 持股健檢
+3. 風險排行
+4. 個股 AI 分析
+5. 最近查詢記憶
+6. 助理下一步建議
+
+安全邊界
+${lineAgentProfile.forbiddenActions.map((item, index) => `${index + 1}. 不${item}`).join("\n")}
+
+記憶狀態：${memory?.recent?.length ? `已累積 ${memory.recent.length} 筆最近查詢` : "尚未累積"}
+提醒：${warnings}`);
+};
+
+const buildLineAgentSuggestions = async (ownerKey) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const entries = analysisEntries([...portfolio.entries()]);
+  if (entries.length === 0) {
+    return lineAgentText.noPortfolio;
+  }
+
+  const snapshots = await getPortfolioSnapshots(entries, { timeoutMs: 2500, raceMs: 3500 });
+  const totals = portfolioTotals(snapshots);
+  const ranked = analysisItems(totals.successful).map((item) => ({
+    ...item,
+    weight: totals.totalMarket > 0 ? (item.marketValue / totals.totalMarket) * 100 : 0
+  }));
+  const heavy = [...ranked].sort((a, b) => b.weight - a.weight).slice(0, 3);
+  const weak = [...ranked].sort((a, b) => a.profitPercent - b.profitPercent).slice(0, 3);
+  const strong = [...ranked].sort((a, b) => b.profitPercent - a.profitPercent).slice(0, 3);
+
+  const heavyRows = heavy.map((item, index) => `${index + 1}. ${stockLabel(item.code, item.name)} ${formatPercent(item.weight)}%`);
+  const weakRows = weak.map((item, index) => `${index + 1}. ${stockLabel(item.code, item.name)} ${formatLineAgentPercent(item.profitPercent)}`);
+  const strongRows = strong.map((item, index) => `${index + 1}. ${stockLabel(item.code, item.name)} ${formatLineAgentPercent(item.profitPercent)}`);
+
+  return toLineSafeText(`AI 助理下一步建議
+
+今天建議你照這個順序處理：
+
+1. 先看風險
+輸入：風險排行
+原因：先處理虧損與集中部位，避免單一持股拖累整體資產。
+
+2. 再看重倉股
+${heavyRows.join("\n") || "資料不足"}
+
+3. 檢查弱勢股
+${weakRows.join("\n") || "資料不足"}
+
+4. 檢查強勢股是否需要停利計畫
+${strongRows.join("\n") || "資料不足"}
+
+5. 如果要深入個股，輸入：
+分析 股票代號
+例如：分析 ${heavy[0]?.code || "2330"}
+
+我的判斷：
+- 若重倉股同時虧損，優先做風險控管。
+- 若強勢股已大幅獲利，先規劃分批停利，不急著全出。
+- 若弱勢股沒有基本面或籌碼支持，不建議只因跌深就加碼。
+
+${lineAgentText.safeNotice}`);
+};
 
 const fetchAiDashboardSummaryForAgent = async (symbol) => {
   const normalized = normalizeDashboardSymbol(symbol);
@@ -2346,6 +2533,9 @@ const buildLineAgentReply = async (intent, ownerKey) => {
   if (intent.type === "dailyReport") return buildDailyAutoPortfolioReport(ownerKey);
   if (intent.type === "portfolioHealth") return buildLineAgentPortfolioHealth(ownerKey);
   if (intent.type === "riskRanking") return buildLineAgentRiskRanking(ownerKey);
+  if (intent.type === "assistantStatus") return buildLineAgentStatus(ownerKey);
+  if (intent.type === "assistantMemory") return buildLineAgentMemoryReport(ownerKey);
+  if (intent.type === "assistantSuggestions") return buildLineAgentSuggestions(ownerKey);
   if (intent.type === "stockAnalysis") return buildLineAgentStockAnalysis(ownerKey, intent.input);
   return null;
 };
@@ -3381,6 +3571,7 @@ async function handleEvent(event) {
   if (lineAgentIntent) {
     try {
       const ownerKey = event.source?.userId || "default";
+      rememberLineAgentInteraction(ownerKey, lineAgentIntent);
       const replyText = await buildLineAgentReply(lineAgentIntent, ownerKey);
       return client.replyMessage(event.replyToken, {
         type: "text",
