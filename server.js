@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-06 BUTLER-WEB-API-5";
+const BOT_BUILD_VERSION = "2026-07-06 BUTLER-WEB-API-6";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -2208,11 +2208,18 @@ const parseLineAgentIntents = (text) => {
   return direct ? [direct] : [];
 };
 
+const formatLineAgentNumber = (value, decimals = 0) =>
+  Number.isFinite(Number(value)) ? Number(value).toFixed(decimals) : "資料不足";
+
+const formatLineAgentRawPercent = (value) => formatLineAgentNumber(value, 2);
+
 const formatLineAgentMoney = (value) =>
-  Number.isFinite(Number(value)) ? `${formatMoney(value)} 元` : "資料不足";
+  Number.isFinite(Number(value)) ? `${formatLineAgentNumber(value, 0)} 元` : "資料不足";
 
 const formatLineAgentPercent = (value) =>
-  Number.isFinite(Number(value)) ? `${profitSign(Number(value))}${formatPercent(value)}%` : "資料不足";
+  Number.isFinite(Number(value))
+    ? `${Number(value) > 0 ? "+" : ""}${formatLineAgentRawPercent(value)}%`
+    : "資料不足";
 
 const formatLineAgentPrice = (value) =>
   Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)} 元` : "資料不足";
@@ -2694,7 +2701,7 @@ const buildLineAgentSuggestions = async (ownerKey) => {
   const weak = [...ranked].sort((a, b) => a.profitPercent - b.profitPercent).slice(0, 3);
   const strong = [...ranked].sort((a, b) => b.profitPercent - a.profitPercent).slice(0, 3);
 
-  const heavyRows = heavy.map((item, index) => `${index + 1}. ${stockLabel(item.code, item.name)} ${formatPercent(item.weight)}%`);
+  const heavyRows = heavy.map((item, index) => `${index + 1}. ${stockLabel(item.code, item.name)} ${formatLineAgentRawPercent(item.weight)}%`);
   const weakRows = weak.map((item, index) => `${index + 1}. ${stockLabel(item.code, item.name)} ${formatLineAgentPercent(item.profitPercent)}`);
   const strongRows = strong.map((item, index) => `${index + 1}. ${stockLabel(item.code, item.name)} ${formatLineAgentPercent(item.profitPercent)}`);
 
@@ -2776,7 +2783,7 @@ const buildLineAgentPortfolioHealth = async (ownerKey) => {
   );
   const weightRows = byWeight.slice(0, 3).map(
     (item, index) =>
-      `${index + 1}. ${stockLabel(item.code, item.name)} ${formatPercent(item.weight)}%`
+      `${index + 1}. ${stockLabel(item.code, item.name)} ${formatLineAgentRawPercent(item.weight)}%`
   );
 
   const concentrationRisk = byWeight.some((item) => item.weight >= 20);
@@ -2840,7 +2847,7 @@ const buildLineAgentRiskRanking = async (ownerKey) => {
       `${index + 1}. ${stockLabel(item.code, item.name)}
 風險分：${item.riskScore}
 損益：${formatLineAgentPercent(item.profitPercent)}
-部位：${formatPercent(item.weight)}%`
+部位：${formatLineAgentRawPercent(item.weight)}%`
   );
 
   return toLineSafeText(`AI 風險排行
@@ -2879,7 +2886,7 @@ const buildLineAgentStockAnalysis = async (ownerKey, stockInput) => {
       ? ((price - previousClose) / previousClose) * 100
       : dashboard?.changeRate;
   const positionText = position
-    ? `目前持有：${formatMoney(position.shares)} 股，平均成本 ${formatLineAgentPrice(position.averageCost)}`
+    ? `目前持有：${formatLineAgentNumber(position.shares, 0)} 股，平均成本 ${formatLineAgentPrice(position.averageCost)}`
     : "目前持股：未持有或尚未同步";
   const positionPnL =
     position && Number.isFinite(price)
