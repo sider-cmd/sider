@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-06 BUTLER-WEB-API-6";
+const BOT_BUILD_VERSION = "2026-07-06 BUTLER-GEMINI-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -60,6 +60,10 @@ const AI_DASHBOARD_BASE_URL =
 const AI_DASHBOARD_CACHE_TTL_MS =
   Number(process.env.AI_DASHBOARD_CACHE_TTL_MS || 10 * 60 * 1000);
 const aiDashboardSummaryCache = new Map();
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_API_BASE_URL =
+  (process.env.GEMINI_API_BASE_URL || "https://generativelanguage.googleapis.com").replace(/\/$/, "");
 
 const jsonBinUrl = (suffix = "") =>
   `https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}${suffix}`;
@@ -2137,6 +2141,14 @@ const normalizeLineAgentCommand = (text) =>
 
 const parseLineAgentIntent = (text) => {
   const input = normalizeLineAgentCommand(text);
+  const geminiStockReviewMatch = input.match(/^(?:Gemini交叉檢查|gemini交叉檢查|GEMINI交叉檢查|交叉檢查)\s+(.+)$/i);
+  if (geminiStockReviewMatch) {
+    return { type: "geminiStockReview", input: geminiStockReviewMatch[1] };
+  }
+  const geminiMatch = input.match(/^(?:Gemini|gemini|GEMINI)(?:整理|分析|摘要|檢查|回答|幫我)?\s+(.+)$/i);
+  if (geminiMatch) {
+    return { type: "geminiButler", input: geminiMatch[1] };
+  }
   if (/^(AI助理|全面AI助理|股票助理|助理|功能|指令)$/i.test(input)) {
     return { type: "help" };
   }
@@ -2551,6 +2563,129 @@ ${item.link}`
 你可以接著問：「整理 ${keyword}」或「找資料 更精準的關鍵字」。`);
 };
 
+const normalizeGeminiModelName = (model) => String(model || GEMINI_MODEL).replace(/^models\//, "");
+
+const extractGeminiText = (data) =>
+  (data?.candidates || [])
+    .flatMap((candidate) => candidate?.content?.parts || [])
+    .map((part) => part?.text || "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+
+const callGeminiText = async (prompt, options = {}) => {
+  if (!GEMINI_API_KEY) {
+    return `Gemini 尚未啟用。
+
+請在 Railway Variables 新增：
+GEMINI_API_KEY=你的 Google AI Studio API Key
+
+可選：
+GEMINI_MODEL=${GEMINI_MODEL}
+
+設定後重新部署，管家就能用 Gemini 做長文整理、交叉檢查與第二意見。`;
+  }
+
+  const model = normalizeGeminiModelName(options.model);
+  const response = await axios.post(
+    `${GEMINI_API_BASE_URL}/v1beta/models/${model}:generateContent`,
+    {
+      systemInstruction: {
+        parts: [
+          {
+            text:
+              options.system ||
+              "你是使用者的繁體中文個人 AI 管家。回答要精準、可執行、保守，不可刪資料，不可代替使用者買賣股票。"
+          }
+        ]
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: String(prompt || "").slice(0, 24000) }]
+        }
+      ],
+      generationConfig: {
+        temperature: options.temperature ?? 0.35,
+        maxOutputTokens: options.maxOutputTokens ?? 1600
+      }
+    },
+    {
+      params: { key: GEMINI_API_KEY },
+      timeout: options.timeoutMs || 30000
+    }
+  );
+
+  const text = extractGeminiText(response.data);
+  return text || "Gemini 沒有回傳可讀文字，請稍後再試。";
+};
+
+const buildButlerContextForGemini = async (ownerKey) => {
+  const state = await getButlerStateSnapshot(ownerKey).catch(() => null);
+  if (!state) return "管家狀態：暫時無法讀取。";
+  const latestWake = state.life?.wakeLogs?.[0]?.at ? butlerTimeText(state.life.wakeLogs[0].at) : "尚未記錄";
+  const latestSleep = state.life?.sleepLogs?.[0]?.at ? butlerTimeText(state.life.sleepLogs[0].at) : "尚未記錄";
+  const reminders = (state.pendingReminders || [])
+    .slice(0, 5)
+    .map((item, index) => `${index + 1}. ${butlerTimeText(item.dueAt)} ${item.title}`)
+    .join("\n");
+  return `管家狀態
+版本：${BOT_BUILD_VERSION}
+最近起床：${latestWake}
+最近睡覺：${latestSleep}
+待提醒：
+${reminders || "目前沒有待提醒"}
+
+安全規則：
+- 不可刪資料。
+- 不可替使用者買賣股票。
+- 可以提供股票風險分析與買賣建議，但必須提醒使用者自行確認。`;
+};
+
+const buildGeminiButlerReply = async (ownerKey, input) => {
+  const task = String(input || "").trim();
+  if (!task) return "請輸入 Gemini 要處理的內容，例如：Gemini整理 這篇文章網址，或：Gemini 幫我規劃明天。";
+  const memory = getButlerMemory(ownerKey);
+  memory.searches.unshift({ query: `Gemini: ${task.slice(0, 80)}`, at: new Date().toISOString() });
+  memory.searches.splice(20);
+  const context = await buildButlerContextForGemini(ownerKey);
+  const answer = await callGeminiText(`${context}
+
+使用者任務：
+${task}
+
+請用繁體中文回答。若是整理文章或資料，請輸出重點、可行動建議、風險或限制。`, {
+    maxOutputTokens: 1800
+  });
+  return toLineSafeText(`Gemini 管家回覆
+
+${answer}`);
+};
+
+const buildGeminiStockReview = async (ownerKey, stockInput) => {
+  const code = resolveLineAgentStockCode(stockInput);
+  if (!/^\d{4,6}$/.test(code)) return "請輸入股票代號或已知股票名稱，例如：交叉檢查 2330。";
+  const baseReport = await buildLineAgentStockAnalysis(ownerKey, code);
+  const context = await buildButlerContextForGemini(ownerKey);
+  const answer = await callGeminiText(`${context}
+
+以下是現有股票助理報告，請你用第二意見角度交叉檢查：
+
+${baseReport}
+
+請輸出：
+1. 原報告最可靠的 3 點
+2. 可能忽略的風險
+3. 買進、續抱、減碼、停利或停損的條件式建議
+4. 明確提醒：不可視為自動交易指令`, {
+    temperature: 0.25,
+    maxOutputTokens: 1800
+  });
+  return toLineSafeText(`Gemini 股票交叉檢查：${stockLabel(code, lineAgentStockNames[code])}
+
+${answer}`);
+};
+
 const rememberLineAgentInteraction = (ownerKey, intent) => {
   if (!ownerKey || !intent) return;
   const saved =
@@ -2586,7 +2721,9 @@ const lineAgentIntentLabel = (type) =>
     stockAnalysis: "個股分析",
     assistantStatus: "助理狀態",
     assistantMemory: "助理記憶",
-    assistantSuggestions: "助理建議"
+    assistantSuggestions: "助理建議",
+    geminiButler: "Gemini 管家",
+    geminiStockReview: "Gemini 股票交叉檢查"
   }[type] || type);
 
 const buildLineAgentMemoryReport = async (ownerKey) => {
@@ -2951,6 +3088,8 @@ const buildLineAgentReply = async (intent, ownerKey) => {
   else if (intent.type === "reminderList") reply = buildButlerReminderList(ownerKey);
   else if (intent.type === "searchInfo") reply = await buildButlerSearchReport(ownerKey, intent.input);
   else if (intent.type === "stockAnalysis") reply = await buildLineAgentStockAnalysis(ownerKey, intent.input);
+  else if (intent.type === "geminiButler") reply = await buildGeminiButlerReply(ownerKey, intent.input);
+  else if (intent.type === "geminiStockReview") reply = await buildGeminiStockReview(ownerKey, intent.input);
 
   await saveButlerCloudState(ownerKey);
   return reply;
@@ -9056,6 +9195,56 @@ app.get('/api/butler/message', requireWebSyncToken, async (req, res) => {
       ok: false,
       error: serviceErrorMessage(error)
     });
+  }
+});
+
+app.post('/api/butler/gemini', requireWebSyncToken, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const text = String(req.body?.text || req.body?.message || req.body?.prompt || "").trim();
+    const mode = String(req.body?.mode || req.query.mode || "butler").trim();
+    if (!text) {
+      return res.status(400).json({ ok: false, error: "text is required" });
+    }
+    const reply =
+      mode === "stock-review"
+        ? await buildGeminiStockReview(ownerKey, text)
+        : await buildGeminiButlerReply(ownerKey, text);
+    await saveButlerCloudState(ownerKey);
+    res.json({
+      ok: true,
+      model: GEMINI_MODEL,
+      mode,
+      text: reply,
+      state: await getButlerStateSnapshot(ownerKey)
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
+  }
+});
+
+app.get('/api/butler/gemini', requireWebSyncToken, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const text = String(req.query.text || req.query.message || req.query.prompt || "").trim();
+    const mode = String(req.query.mode || "butler").trim();
+    if (!text) {
+      return res.status(400).json({ ok: false, error: "text is required" });
+    }
+    const reply =
+      mode === "stock-review"
+        ? await buildGeminiStockReview(ownerKey, text)
+        : await buildGeminiButlerReply(ownerKey, text);
+    await saveButlerCloudState(ownerKey);
+    res.json({
+      ok: true,
+      model: GEMINI_MODEL,
+      mode,
+      text: reply,
+      state: await getButlerStateSnapshot(ownerKey)
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
   }
 });
 
