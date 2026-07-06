@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-06 BUTLER-WEB-API-4";
+const BOT_BUILD_VERSION = "2026-07-06 BUTLER-WEB-API-5";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -2860,8 +2860,10 @@ const buildLineAgentStockAnalysis = async (ownerKey, stockInput) => {
     return lineAgentText.stockNotFound;
   }
 
+  const quoteRequest =
+    typeof fetchYahooQuote === "function" ? fetchYahooQuote(code, 3500).catch(() => null) : Promise.resolve(null);
   const [quote, dashboard, portfolio] = await Promise.all([
-    fetchYahooQuote(code, 3500).catch(() => null),
+    quoteRequest,
     fetchAiDashboardSummaryForAgent(code),
     getPortfolio(ownerKey).catch(() => new Map())
   ]);
