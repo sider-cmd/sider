@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-06-23 PROFESSIONAL-ACTION-1";
+const BOT_BUILD_VERSION = "2026-07-06 LINE-AI-ASSISTANT-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
