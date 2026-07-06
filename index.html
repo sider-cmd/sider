@@ -122,7 +122,7 @@ header {
 
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 12px; }
 .field label { display: block; font-size: 11px; color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.4px; }
-input[type="text"], input[type="number"], input[type="date"], input[type="password"], select {
+input[type="text"], input[type="number"], input[type="date"], input[type="password"], textarea, select {
   width: 100%;
   padding: 10px 12px;
   background: var(--bg-elevated);
@@ -133,6 +133,8 @@ input[type="text"], input[type="number"], input[type="date"], input[type="passwo
   transition: border-color 0.15s;
 }
 input:focus, select:focus { outline: none; border-color: var(--accent); }
+textarea { min-height: 92px; resize: vertical; line-height: 1.6; }
+textarea:focus { outline: none; border-color: var(--accent); }
 .flash-success { background: rgba(52, 211, 153, 0.15) !important; border-color: var(--down) !important; }
 
 .btn {
@@ -196,6 +198,12 @@ tr:last-child td { border-bottom: none; }
 .note strong { color: var(--text); }
 .note.success { background: rgba(52, 211, 153, 0.08); border-color: rgba(52, 211, 153, 0.25); }
 .note.warn { background: rgba(251, 191, 36, 0.08); border-color: rgba(251, 191, 36, 0.25); }
+.butler-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+@media (min-width: 760px) { .butler-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.butler-output { white-space: pre-wrap; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; min-height: 120px; color: var(--text); line-height: 1.7; }
+.butler-list { display: grid; gap: 8px; }
+.butler-item { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; line-height: 1.6; }
+.butler-item strong { color: var(--text); }
 
 .name-pills { display: flex; flex-wrap: wrap; gap: 6px; }
 .name-pill {
@@ -348,6 +356,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     <button class="tab" data-tab="trades">交易</button>
     <button class="tab" data-tab="dividends">股利</button>
     <button class="tab" data-tab="monthly">月盈虧</button>
+    <button class="tab" data-tab="butler">管家</button>
     <button class="tab" data-tab="settings">設定</button>
   </div>
 
@@ -694,6 +703,73 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
           </tr></thead>
           <tbody id="monthly-tbody"></tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-butler" class="tab-content" style="display:none;">
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">AI 個人管家</div>
+          <div class="muted" style="font-size:12px;margin-top:4px;">Web、LINE、手機捷徑共用同一份管家記憶</div>
+        </div>
+        <button class="btn btn-sm btn-ghost" id="butler-refresh-btn">重新整理</button>
+      </div>
+      <div class="butler-grid">
+        <div class="note" style="margin:0;"><span class="muted">最近起床</span><br><strong id="butler-wake">尚未記錄</strong></div>
+        <div class="note" style="margin:0;"><span class="muted">最近睡覺</span><br><strong id="butler-sleep">尚未記錄</strong></div>
+        <div class="note" style="margin:0;"><span class="muted">待提醒</span><br><strong id="butler-reminders-count">0 筆</strong></div>
+        <div class="note" style="margin:0;"><span class="muted">最近查資料</span><br><strong id="butler-search">尚未查詢</strong></div>
+      </div>
+      <div class="field">
+        <label>管家指令</label>
+        <textarea id="butler-message" placeholder="例如：鬧鐘 06:05 起床.睡覺 23:00&#10;或：找資料 AI Agent 架構&#10;或：分析 2330"></textarea>
+      </div>
+      <div class="btn-row" style="margin-top:10px;">
+        <button class="btn" id="butler-send-btn">送出</button>
+        <button class="btn btn-ghost" data-butler-quick="鬧鐘 06:05 起床">06:05 起床</button>
+        <button class="btn btn-ghost" data-butler-quick="睡覺 23:00">睡覺 23:00</button>
+        <button class="btn btn-ghost" data-butler-quick="作息紀錄">作息紀錄</button>
+        <button class="btn btn-ghost" data-butler-quick="鬧鐘列表">鬧鐘列表</button>
+        <button class="btn btn-ghost" data-butler-quick="助理記憶">助理記憶</button>
+      </div>
+      <div class="muted" id="butler-status" style="font-size:12px;margin-top:10px;">尚未載入</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">管家回覆</div>
+      <div class="butler-output" id="butler-output">可以在上方輸入指令，或用 LINE / 手機捷徑呼叫同一套 API。</div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">鬧鐘與提醒</div>
+        <button class="btn btn-sm btn-ghost" data-butler-quick="鬧鐘列表">查看列表</button>
+      </div>
+      <div class="butler-list" id="butler-reminders-list"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">作息紀錄</div>
+      <div class="butler-grid">
+        <div>
+          <div class="card-subtitle">起床</div>
+          <div class="butler-list" id="butler-wake-list"></div>
+        </div>
+        <div>
+          <div class="card-subtitle">睡覺</div>
+          <div class="butler-list" id="butler-sleep-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">手機捷徑 API</div>
+      <div class="note">
+        iPhone/Android 捷徑可以呼叫：
+        <br><strong>GET /api/butler/message?text=起床&amp;token=你的同步Token</strong>
+        <br>也可以送出 POST JSON：<strong>{ "text": "提醒 30分鐘 喝水" }</strong>
       </div>
     </div>
   </div>
@@ -2957,6 +3033,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     if (t.dataset.tab === 'overview') { renderOverview(); renderTrend(); }
     if (t.dataset.tab === 'monthly') renderMonthlyPnl();
     if (t.dataset.tab === 'dividends') renderDividends();
+    if (t.dataset.tab === 'butler') refreshButlerPanel();
     if (t.dataset.tab === 'settings') {
       renderAiSummaryPreview();
       checkLineSyncStatus();
@@ -3366,6 +3443,95 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     return data;
   }
 
+  function formatButlerTime(value) {
+    if (!value) return '尚未記錄';
+    return new Date(value).toLocaleString('zh-TW', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  }
+
+  function butlerItem(text) {
+    return `<div class="butler-item">${escapeHtml(text)}</div>`;
+  }
+
+  function renderButlerState(data) {
+    const stateData = data?.state || data || {};
+    const life = stateData.life || {};
+    const reminders = stateData.pendingReminders || stateData.reminders || [];
+    const agentMemory = stateData.agentMemory || {};
+    const searches = life.searches || [];
+    const wakeLogs = life.wakeLogs || [];
+    const sleepLogs = life.sleepLogs || [];
+
+    const wake = wakeLogs[0]?.at;
+    const sleep = sleepLogs[0]?.at;
+    $('butler-wake').textContent = formatButlerTime(wake);
+    $('butler-sleep').textContent = formatButlerTime(sleep);
+    $('butler-reminders-count').textContent = `${reminders.filter(item => !item.sent).length} 筆`;
+    $('butler-search').textContent = searches[0]?.query || '尚未查詢';
+
+    $('butler-reminders-list').innerHTML = reminders.length
+      ? reminders
+          .filter(item => !item.sent)
+          .slice(0, 10)
+          .map(item => butlerItem(`${formatButlerTime(item.dueAt)}｜${item.title || '提醒'}`))
+          .join('')
+      : '<div class="empty">目前沒有待提醒鬧鐘</div>';
+
+    $('butler-wake-list').innerHTML = wakeLogs.length
+      ? wakeLogs.slice(0, 8).map(item => butlerItem(formatButlerTime(item.at))).join('')
+      : '<div class="empty">尚未記錄起床</div>';
+
+    $('butler-sleep-list').innerHTML = sleepLogs.length
+      ? sleepLogs.slice(0, 8).map(item => butlerItem(formatButlerTime(item.at))).join('')
+      : '<div class="empty">尚未記錄睡覺</div>';
+
+    const recent = agentMemory.recent || [];
+    $('butler-status').textContent = recent.length
+      ? `已載入｜最近 ${recent.length} 筆管家互動`
+      : '已載入｜尚未累積管家互動';
+  }
+
+  async function refreshButlerPanel() {
+    const status = $('butler-status');
+    status.textContent = '載入管家記憶中...';
+    try {
+      const data = await lineSyncRequest('/api/butler/memory');
+      renderButlerState(data);
+    } catch (error) {
+      status.textContent = '管家記憶載入失敗：' + error.message;
+      status.style.color = 'var(--up)';
+    }
+  }
+
+  async function sendButlerMessage(text) {
+    const message = String(text || $('butler-message').value || '').trim();
+    if (!message) {
+      showToast('請輸入管家指令');
+      return;
+    }
+    $('butler-send-btn').disabled = true;
+    $('butler-status').textContent = '管家處理中...';
+    try {
+      const data = await lineSyncRequest('/api/butler/message', {
+        method: 'POST',
+        body: JSON.stringify({ text: message })
+      });
+      $('butler-output').textContent = data.text || '已處理';
+      renderButlerState(data.state || data);
+      $('butler-message').value = '';
+      showToast('管家已處理', 'down');
+    } catch (error) {
+      $('butler-output').textContent = '管家處理失敗：' + error.message;
+      showToast('管家處理失敗');
+    } finally {
+      $('butler-send-btn').disabled = false;
+    }
+  }
+
   function syncHealthCounts(data) {
     const holdings = computeHoldingsFromData(data)
       .filter(h => h.shares > 0 && !isExcludedSymbolInData(h.symbol, data));
@@ -3554,6 +3720,14 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   $('line-push-btn').addEventListener('click', pushWebStateToLine);
   $('line-pull-btn').addEventListener('click', pullLineStateToWeb);
   $('sync-indicator').addEventListener('click', () => pullFromCloud(false));
+  $('butler-refresh-btn').addEventListener('click', refreshButlerPanel);
+  $('butler-send-btn').addEventListener('click', () => sendButlerMessage());
+  $('butler-message').addEventListener('keydown', event => {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') sendButlerMessage();
+  });
+  document.querySelectorAll('[data-butler-quick]').forEach(button => {
+    button.addEventListener('click', () => sendButlerMessage(button.dataset.butlerQuick));
+  });
 
   $('export-btn').addEventListener('click', () => {
     const blob = new Blob([JSON.stringify(state,null,2)], { type: 'application/json' });
