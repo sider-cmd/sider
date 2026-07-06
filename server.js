@@ -2573,6 +2573,15 @@ const extractGeminiText = (data) =>
     .join("\n")
     .trim();
 
+const geminiErrorMessage = (error) => {
+  const detail = error?.response?.data;
+  const apiError = detail?.error;
+  if (apiError?.message) return `Gemini API ${apiError.code || ""}: ${apiError.message}`.trim();
+  if (typeof detail === "string" && detail.trim()) return detail.trim();
+  if (error?.response?.status) return `Gemini API HTTP ${error.response.status}`;
+  return error?.message || "Gemini API request failed";
+};
+
 const callGeminiText = async (prompt, options = {}) => {
   if (!GEMINI_API_KEY) {
     return `Gemini 尚未啟用。
@@ -2587,34 +2596,39 @@ GEMINI_MODEL=${GEMINI_MODEL}
   }
 
   const model = normalizeGeminiModelName(options.model);
-  const response = await axios.post(
-    `${GEMINI_API_BASE_URL}/v1beta/models/${model}:generateContent`,
-    {
-      systemInstruction: {
-        parts: [
+  let response;
+  try {
+    response = await axios.post(
+      `${GEMINI_API_BASE_URL}/v1beta/models/${model}:generateContent`,
+      {
+        systemInstruction: {
+          parts: [
+            {
+              text:
+                options.system ||
+                "你是使用者的繁體中文個人 AI 管家。回答要精準、可執行、保守，不可刪資料，不可代替使用者買賣股票。"
+            }
+          ]
+        },
+        contents: [
           {
-            text:
-              options.system ||
-              "你是使用者的繁體中文個人 AI 管家。回答要精準、可執行、保守，不可刪資料，不可代替使用者買賣股票。"
+            role: "user",
+            parts: [{ text: String(prompt || "").slice(0, 24000) }]
           }
-        ]
-      },
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: String(prompt || "").slice(0, 24000) }]
+        ],
+        generationConfig: {
+          temperature: options.temperature ?? 0.35,
+          maxOutputTokens: options.maxOutputTokens ?? 1600
         }
-      ],
-      generationConfig: {
-        temperature: options.temperature ?? 0.35,
-        maxOutputTokens: options.maxOutputTokens ?? 1600
+      },
+      {
+        headers: { "x-goog-api-key": GEMINI_API_KEY },
+        timeout: options.timeoutMs || 30000
       }
-    },
-    {
-      params: { key: GEMINI_API_KEY },
-      timeout: options.timeoutMs || 30000
-    }
-  );
+    );
+  } catch (error) {
+    throw new Error(geminiErrorMessage(error));
+  }
 
   const text = extractGeminiText(response.data);
   return text || "Gemini 沒有回傳可讀文字，請稍後再試。";
