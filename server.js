@@ -2084,6 +2084,272 @@ const toLineSafeText = (text, limit = 4800) => {
   return `${value.slice(0, limit)}\n\n（內容較長，已先截斷。可再輸入「盤中分析」重新查詢。）`;
 };
 
+const lineAgentText = {
+  help: `AI 股票助理
+
+你可以直接在 LINE 輸入：
+1. 今日報告
+2. 持股健檢
+3. 風險排行
+4. 分析 2330
+5. 看持股
+
+安全規則：
+- 我只做分析與建議，不會自動買賣股票。
+- 我不會刪除資料。
+- 資料不足時會明講，不硬猜。
+- 買進、續抱、減碼、賣出都只會用「建議」形式呈現。
+
+建議用法：
+早上問「今日報告」，盤中問「分析 股票代號」，收盤後問「持股健檢」或「風險排行」。`,
+  noPortfolio: "目前沒有持股資料，請先同步網頁資產表或輸入「匯入持股」。",
+  stockNotFound: "找不到這支股票，請輸入股票代號，例如：分析 2330。",
+  safeNotice: "提醒：這是 AI 風險分析與決策輔助，不是自動交易指令；買賣前請自行確認資金、風險與最新資訊。"
+};
+
+const normalizeLineAgentCommand = (text) =>
+  String(text || "")
+    .trim()
+    .replace(/\s+/g, " ");
+
+const parseLineAgentIntent = (text) => {
+  const input = normalizeLineAgentCommand(text);
+  if (/^(AI助理|全面AI助理|股票助理|助理|功能|指令)$/i.test(input)) {
+    return { type: "help" };
+  }
+  if (/^(今日報告|今日總結|持股日報|每日報告|日報)$/i.test(input)) {
+    return { type: "dailyReport" };
+  }
+  if (/^(持股健檢|AI持股健檢|健檢持股|看持股|我的持股健檢)$/i.test(input)) {
+    return { type: "portfolioHealth" };
+  }
+  if (/^(風險排行|風險控管|持股風險|高風險持股)$/i.test(input)) {
+    return { type: "riskRanking" };
+  }
+
+  const analysisMatch = input.match(/^(?:分析|AI分析|助理分析)\s*([0-9A-Za-z]{4,6}|\S+)$/i);
+  if (analysisMatch) {
+    return { type: "stockAnalysis", input: analysisMatch[1] };
+  }
+
+  return null;
+};
+
+const formatLineAgentMoney = (value) =>
+  Number.isFinite(Number(value)) ? `${formatMoney(value)} 元` : "資料不足";
+
+const formatLineAgentPercent = (value) =>
+  Number.isFinite(Number(value)) ? `${profitSign(Number(value))}${formatPercent(value)}%` : "資料不足";
+
+const formatLineAgentPrice = (value) =>
+  Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)} 元` : "資料不足";
+
+const fetchAiDashboardSummaryForAgent = async (symbol) => {
+  const normalized = normalizeDashboardSymbol(symbol);
+  if (!normalized) return null;
+
+  try {
+    const response = await axios.get(`${AI_DASHBOARD_BASE_URL}/api/dashboard`, {
+      params: { symbol: normalized, timeframe: "D", refresh: "false" },
+      timeout: 10000
+    });
+    return compactAiDashboardSummary(response.data, normalized);
+  } catch (error) {
+    console.warn(`AI dashboard summary unavailable for ${normalized}: ${serviceErrorMessage(error)}`);
+    return null;
+  }
+};
+
+const buildLineAgentPortfolioHealth = async (ownerKey) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const entries = analysisEntries([...portfolio.entries()]);
+  if (entries.length === 0) {
+    return lineAgentText.noPortfolio;
+  }
+
+  const snapshots = await getPortfolioSnapshots(entries, { timeoutMs: 2500, raceMs: 3500 });
+  const totals = portfolioTotals(snapshots);
+  if (totals.successful.length === 0) {
+    return "目前即時報價查詢失敗，暫時無法產生持股健檢。";
+  }
+
+  const ranked = analysisItems(totals.successful);
+  const byProfit = [...ranked].sort((a, b) => b.profitPercent - a.profitPercent);
+  const byLoss = [...ranked].sort((a, b) => a.profitPercent - b.profitPercent);
+  const byWeight = [...ranked]
+    .map((item) => ({
+      ...item,
+      weight: totals.totalMarket > 0 ? (item.marketValue / totals.totalMarket) * 100 : 0
+    }))
+    .sort((a, b) => b.weight - a.weight);
+
+  const topRows = byProfit.slice(0, 3).map(
+    (item, index) =>
+      `${index + 1}. ${stockLabel(item.code, item.name)} ${formatLineAgentPercent(item.profitPercent)}`
+  );
+  const watchRows = byLoss.slice(0, 3).map(
+    (item, index) =>
+      `${index + 1}. ${stockLabel(item.code, item.name)} ${formatLineAgentPercent(item.profitPercent)}`
+  );
+  const weightRows = byWeight.slice(0, 3).map(
+    (item, index) =>
+      `${index + 1}. ${stockLabel(item.code, item.name)} ${formatPercent(item.weight)}%`
+  );
+
+  const concentrationRisk = byWeight.some((item) => item.weight >= 20);
+  const lossRisk = byLoss.some((item) => item.profitPercent <= -15);
+  const riskLevel = concentrationRisk && lossRisk ? "偏高" : concentrationRisk || lossRisk ? "中等" : "穩定";
+
+  return toLineSafeText(`AI 持股健檢
+
+結論：目前風險等級 ${riskLevel}
+持股檔數：${entries.length} 檔
+總市值：${formatLineAgentMoney(totals.totalMarket)}
+未實現損益：${formatLineAgentMoney(totals.totalProfit)}（${formatLineAgentPercent(totals.totalPercent)}）
+
+表現較強
+${topRows.join("\n") || "資料不足"}
+
+優先留意
+${watchRows.join("\n") || "資料不足"}
+
+部位集中度
+${weightRows.join("\n") || "資料不足"}
+
+操作建議：
+1. 單一持股超過 20% 時，先控管集中風險。
+2. 虧損超過 15% 的持股，重新檢查買進理由與停損計畫。
+3. 獲利持股可分批檢視停利，不要一次用情緒決策。
+
+${lineAgentText.safeNotice}`);
+};
+
+const buildLineAgentRiskRanking = async (ownerKey) => {
+  const portfolio = await getPortfolio(ownerKey);
+  const entries = analysisEntries([...portfolio.entries()]);
+  if (entries.length === 0) {
+    return lineAgentText.noPortfolio;
+  }
+
+  const snapshots = await getPortfolioSnapshots(entries, { timeoutMs: 2500, raceMs: 3500 });
+  const totals = portfolioTotals(snapshots);
+  const ranked = analysisItems(totals.successful)
+    .map((item) => {
+      const weight = totals.totalMarket > 0 ? (item.marketValue / totals.totalMarket) * 100 : 0;
+      const lossScore = item.profitPercent < 0 ? Math.min(45, Math.abs(item.profitPercent)) : 0;
+      const weightScore = Math.min(35, weight * 1.2);
+      const volatilityScore = Math.abs(item.profitPercent) >= 20 ? 10 : 0;
+      return {
+        ...item,
+        weight,
+        riskScore: Math.round(lossScore + weightScore + volatilityScore)
+      };
+    })
+    .sort((a, b) => b.riskScore - a.riskScore)
+    .slice(0, 5);
+
+  if (ranked.length === 0) {
+    return "目前即時報價查詢失敗，暫時無法產生風險排行。";
+  }
+
+  const rows = ranked.map(
+    (item, index) =>
+      `${index + 1}. ${stockLabel(item.code, item.name)}
+風險分：${item.riskScore}
+損益：${formatLineAgentPercent(item.profitPercent)}
+部位：${formatPercent(item.weight)}%`
+  );
+
+  return toLineSafeText(`AI 風險排行
+
+${rows.join("\n\n")}
+
+判讀：
+- 風險分越高，代表虧損幅度、部位集中度或波動風險越需要優先處理。
+- 高風險不等於一定要賣出，但應該先檢查停損、資金占比與最新消息。
+
+${lineAgentText.safeNotice}`);
+};
+
+const buildLineAgentStockAnalysis = async (ownerKey, stockInput) => {
+  const code = resolveStockCode(stockInput);
+  if (!/^\d{4,6}$/.test(code)) {
+    return lineAgentText.stockNotFound;
+  }
+
+  const [quote, dashboard, portfolio] = await Promise.all([
+    fetchYahooQuote(code, 3500).catch(() => null),
+    fetchAiDashboardSummaryForAgent(code),
+    getPortfolio(ownerKey).catch(() => new Map())
+  ]);
+  if (!quote && !dashboard) {
+    return `目前查不到 ${stockLabel(code, stockNames[code])} 的行情或 AI 分析資料。`;
+  }
+
+  const position = portfolio.get(code);
+  const price = Number(quote?.regularMarketPrice ?? dashboard?.price);
+  const previousClose = Number(quote?.previousClose);
+  const changePercent =
+    Number.isFinite(price) && Number.isFinite(previousClose) && previousClose > 0
+      ? ((price - previousClose) / previousClose) * 100
+      : dashboard?.changeRate;
+  const positionText = position
+    ? `目前持有：${formatMoney(position.shares)} 股，平均成本 ${formatLineAgentPrice(position.averageCost)}`
+    : "目前持股：未持有或尚未同步";
+  const positionPnL =
+    position && Number.isFinite(price)
+      ? `持股損益：約 ${formatLineAgentMoney((price - Number(position.averageCost)) * Number(position.shares))}（${formatLineAgentPercent(((price - Number(position.averageCost)) / Number(position.averageCost)) * 100)}）`
+      : "持股損益：資料不足";
+
+  const dashboardLines = dashboard
+    ? [
+        `AI 訊號：${dashboard.signal || "資料不足"}`,
+        `AI 標題：${dashboard.headline || "資料不足"}`,
+        `信心 / 風險：${dashboard.confidence ?? "?"} / ${dashboard.risk ?? "?"}`,
+        `策略：${dashboard.strategy || "資料不足"}`,
+        `目標 / 停損：${formatLineAgentPrice(dashboard.target)} / ${formatLineAgentPrice(dashboard.stop)}`,
+        `籌碼：${dashboard.chipRank || "資料不足"}`,
+        `健康度：${dashboard.health || "資料不足"}`
+      ]
+    : ["AI dashboard：暫時無法取得，先用即時行情與持股資料判斷。"];
+
+  const action =
+    dashboard?.signal ||
+    (Number.isFinite(changePercent) && changePercent <= -3
+      ? "觀察風險"
+      : Number.isFinite(changePercent) && changePercent >= 3
+      ? "留意追高"
+      : "觀望");
+
+  return toLineSafeText(`AI 個股分析：${stockLabel(code, stockNames[code])}
+
+結論：${action}
+現價：${formatLineAgentPrice(price)}
+今日漲跌：${formatLineAgentPercent(changePercent)}
+${positionText}
+${positionPnL}
+
+AI 分析
+${dashboardLines.join("\n")}
+
+我的建議：
+1. 已持有：先看停損價、部位比重與 AI 風險分，不要只看單日漲跌。
+2. 未持有：等回檔或訊號轉強再評估，不建議因單一訊號追價。
+3. 若 AI 風險分偏高，先降低部位或設定明確停損，而不是加碼攤平。
+
+${lineAgentText.safeNotice}`);
+};
+
+const buildLineAgentReply = async (intent, ownerKey) => {
+  if (!intent) return null;
+  if (intent.type === "help") return lineAgentText.help;
+  if (intent.type === "dailyReport") return buildDailyAutoPortfolioReport(ownerKey);
+  if (intent.type === "portfolioHealth") return buildLineAgentPortfolioHealth(ownerKey);
+  if (intent.type === "riskRanking") return buildLineAgentRiskRanking(ownerKey);
+  if (intent.type === "stockAnalysis") return buildLineAgentStockAnalysis(ownerKey, intent.input);
+  return null;
+};
+
 const TDCC_SHAREHOLDING_URL = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5";
 const TDCC_SHAREHOLDING_CACHE_MS = 6 * 60 * 60 * 1000;
 const SHAREHOLDING_BIG_TIERS = new Set([12, 13, 14, 15]);
@@ -3107,6 +3373,24 @@ async function handleEvent(event) {
         text:
           textFromCodes(9888, 65039, 32, 25104, 26412, 30064, 24120, 25688, 35201, 26597, 35426, 22833, 25943, 65292, 20294, 31243, 24335, 26377, 25910, 21040, 25351, 20196) +
           "\n" + textFromCodes(35531, 21040, 32, 82, 97, 105, 108, 119, 97, 121, 32, 68, 101, 112, 108, 111, 121, 32, 76, 111, 103, 115, 32, 26597, 30475, 32, 99, 111, 115, 116, 32, 97, 108, 101, 114, 116, 32, 115, 117, 109, 109, 97, 114, 121, 32, 102, 97, 105, 108, 101, 100, 32, 24460, 38754, 30340, 37679, 35492)
+      });
+    }
+  }
+
+  const lineAgentIntent = parseLineAgentIntent(marketInput);
+  if (lineAgentIntent) {
+    try {
+      const ownerKey = event.source?.userId || "default";
+      const replyText = await buildLineAgentReply(lineAgentIntent, ownerKey);
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: toLineSafeText(replyText)
+      });
+    } catch (error) {
+      console.error("line agent router failed:", error);
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: `AI 助理暫時無法完成這個指令：${serviceErrorMessage(error)}\n\n請稍後再試，或改問「AI助理」查看可用指令。`
       });
     }
   }
