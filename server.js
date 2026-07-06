@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-06 LINE-AI-BUTLER-2";
+const BOT_BUILD_VERSION = "2026-07-06 BUTLER-WEB-API-1";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -2916,6 +2916,45 @@ const buildLineAgentReply = async (intent, ownerKey) => {
 
   await saveButlerCloudState(ownerKey);
   return reply;
+};
+
+const buildLineAgentReplies = async (text, ownerKey) => {
+  const intents = parseLineAgentIntents(text);
+  if (intents.length === 0) {
+    return {
+      ok: false,
+      replies: [],
+      text: "管家目前看不懂這個指令。可輸入：管家、鬧鐘 06:05 起床、睡覺 23:00、找資料 AI Agent、分析 2330。"
+    };
+  }
+
+  const replies = [];
+  for (const intent of intents) {
+    rememberLineAgentInteraction(ownerKey, intent);
+    const reply = await buildLineAgentReply(intent, ownerKey);
+    if (reply) replies.push(reply);
+  }
+  return {
+    ok: true,
+    replies,
+    text: replies.join("\n\n---\n\n")
+  };
+};
+
+const getButlerStateSnapshot = async (ownerKey) => {
+  await hydrateButlerCloudState(ownerKey);
+  const life = normalizeButlerLifeMemory(getButlerMemory(ownerKey));
+  const agentMemory = normalizeButlerAgentMemory(lineAgentInteractionMemory.get(ownerKey) || {});
+  const reminders = normalizeButlerReminders(lineButlerReminders.get(ownerKey) || []);
+  return {
+    ok: true,
+    version: BOT_BUILD_VERSION,
+    life,
+    agentMemory,
+    reminders,
+    pendingReminders: reminders.filter((item) => !item.sent && new Date(item.dueAt).getTime() > Date.now()),
+    updatedAt: new Date().toISOString()
+  };
 };
 
 const TDCC_SHAREHOLDING_URL = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5";
@@ -8926,6 +8965,84 @@ app.get('/api/cloud-state/integrity', requireConfiguredWebSyncToken, async (req,
       ok: false,
       error: serviceErrorMessage(error)
     });
+  }
+});
+
+app.post('/api/butler/message', requireWebSyncToken, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const text = String(req.body?.text || req.body?.message || "").trim();
+    if (!text) {
+      return res.status(400).json({ ok: false, error: "text is required" });
+    }
+    const result = await buildLineAgentReplies(text, ownerKey);
+    const state = await getButlerStateSnapshot(ownerKey);
+    res.json({
+      ...result,
+      state
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: serviceErrorMessage(error)
+    });
+  }
+});
+
+app.get('/api/butler/message', requireWebSyncToken, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const text = String(req.query.text || req.query.message || "").trim();
+    if (!text) {
+      return res.status(400).json({ ok: false, error: "text is required" });
+    }
+    const result = await buildLineAgentReplies(text, ownerKey);
+    const state = await getButlerStateSnapshot(ownerKey);
+    res.json({
+      ...result,
+      state
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: serviceErrorMessage(error)
+    });
+  }
+});
+
+app.get('/api/butler/memory', requireWebSyncToken, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    res.json(await getButlerStateSnapshot(ownerKey));
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
+  }
+});
+
+app.get('/api/butler/reminders', requireWebSyncToken, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const state = await getButlerStateSnapshot(ownerKey);
+    res.json({
+      ok: true,
+      reminders: state.reminders,
+      pendingReminders: state.pendingReminders
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
+  }
+});
+
+app.get('/api/butler/life-log', requireWebSyncToken, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const state = await getButlerStateSnapshot(ownerKey);
+    res.json({
+      ok: true,
+      life: state.life
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
   }
 });
 
