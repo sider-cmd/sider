@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-07 BUTLER-GEMINI-2";
+const BOT_BUILD_VERSION = "2026-07-07 BUTLER-GEMINI-3";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -2356,6 +2356,23 @@ const getLineAgentPortfolioSnapshots = async (entries, options = {}) => {
   );
 };
 
+const getLineAgentPortfolioTotals = (snapshots = []) => {
+  const successful = snapshots.filter((item) => !item.error);
+  const totalCost = successful.reduce((sum, item) => sum + Number(item.costValue || 0), 0);
+  const totalMarket = successful.reduce((sum, item) => sum + Number(item.marketValue || 0), 0);
+  const totalProfit = totalMarket - totalCost;
+  const totalPercent = totalCost > 0 ? (totalProfit / totalCost) * 100 : 0;
+
+  return {
+    successful,
+    failedCount: snapshots.length - successful.length,
+    totalCost,
+    totalMarket,
+    totalProfit,
+    totalPercent
+  };
+};
+
 const hydrateButlerCloudState = async (ownerKey) => {
   if (!ownerKey || lineButlerCloudLoaded.has(ownerKey)) return;
   lineButlerCloudLoaded.add(ownerKey);
@@ -2905,7 +2922,7 @@ const buildLineAgentSuggestions = async (ownerKey) => {
   }
 
   const snapshots = await getLineAgentPortfolioSnapshots(entries, { timeoutMs: 2500, raceMs: 3500 });
-  const totals = portfolioTotals(snapshots);
+  const totals = getLineAgentPortfolioTotals(snapshots);
   const ranked = analysisItems(totals.successful).map((item) => ({
     ...item,
     weight: totals.totalMarket > 0 ? (item.marketValue / totals.totalMarket) * 100 : 0
@@ -2971,7 +2988,7 @@ const buildLineAgentPortfolioHealth = async (ownerKey) => {
   }
 
   const snapshots = await getLineAgentPortfolioSnapshots(entries, { timeoutMs: 2500, raceMs: 3500 });
-  const totals = portfolioTotals(snapshots);
+  const totals = getLineAgentPortfolioTotals(snapshots);
   if (totals.successful.length === 0) {
     return "目前即時報價查詢失敗，暫時無法產生持股健檢。";
   }
@@ -3035,7 +3052,7 @@ const buildLineAgentRiskRanking = async (ownerKey) => {
   }
 
   const snapshots = await getLineAgentPortfolioSnapshots(entries, { timeoutMs: 2500, raceMs: 3500 });
-  const totals = portfolioTotals(snapshots);
+  const totals = getLineAgentPortfolioTotals(snapshots);
   const ranked = analysisItems(totals.successful)
     .map((item) => {
       const weight = totals.totalMarket > 0 ? (item.marketValue / totals.totalMarket) * 100 : 0;
