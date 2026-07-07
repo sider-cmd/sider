@@ -5,7 +5,7 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-06 BUTLER-GEMINI-1";
+const BOT_BUILD_VERSION = "2026-07-07 BUTLER-GEMINI-2";
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -2294,6 +2294,68 @@ const resolveLineAgentStockCode = (input) => {
   return lineAgentReverseStockNames[normalized] || normalized;
 };
 
+const getLineAgentPortfolioSnapshots = async (entries, options = {}) => {
+  const timeoutMs = options.timeoutMs || 2500;
+  const raceMs = options.raceMs || 3500;
+
+  return Promise.all(
+    entries.map(async ([code, position]) =>
+      Promise.race([
+        (async () => {
+          try {
+            const quote = await fetchAlertYahooQuote(code, timeoutMs);
+            const price = Number(quote.regularMarketPrice);
+            const shares = Number(position.shares);
+            const averageCost = Number(position.averageCost);
+            if (!Number.isFinite(price) || !Number.isFinite(shares) || !Number.isFinite(averageCost)) {
+              throw new Error("invalid portfolio snapshot");
+            }
+
+            const costValue = averageCost * shares;
+            const marketValue = price * shares;
+            const profit = marketValue - costValue;
+            const profitPercent = costValue > 0 ? (profit / costValue) * 100 : 0;
+
+            return {
+              code,
+              name: lineAgentStockNames[code] || code,
+              shares,
+              averageCost,
+              price,
+              costValue,
+              marketValue,
+              profit,
+              profitPercent,
+              error: false
+            };
+          } catch {
+            return {
+              code,
+              name: lineAgentStockNames[code] || code,
+              shares: Number(position.shares),
+              averageCost: Number(position.averageCost),
+              error: true
+            };
+          }
+        })(),
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                code,
+                name: lineAgentStockNames[code] || code,
+                shares: Number(position.shares),
+                averageCost: Number(position.averageCost),
+                error: true
+              }),
+            raceMs
+          )
+        )
+      ])
+    )
+  );
+};
+
 const hydrateButlerCloudState = async (ownerKey) => {
   if (!ownerKey || lineButlerCloudLoaded.has(ownerKey)) return;
   lineButlerCloudLoaded.add(ownerKey);
@@ -2842,7 +2904,7 @@ const buildLineAgentSuggestions = async (ownerKey) => {
     return lineAgentText.noPortfolio;
   }
 
-  const snapshots = await getPortfolioSnapshots(entries, { timeoutMs: 2500, raceMs: 3500 });
+  const snapshots = await getLineAgentPortfolioSnapshots(entries, { timeoutMs: 2500, raceMs: 3500 });
   const totals = portfolioTotals(snapshots);
   const ranked = analysisItems(totals.successful).map((item) => ({
     ...item,
@@ -2908,7 +2970,7 @@ const buildLineAgentPortfolioHealth = async (ownerKey) => {
     return lineAgentText.noPortfolio;
   }
 
-  const snapshots = await getPortfolioSnapshots(entries, { timeoutMs: 2500, raceMs: 3500 });
+  const snapshots = await getLineAgentPortfolioSnapshots(entries, { timeoutMs: 2500, raceMs: 3500 });
   const totals = portfolioTotals(snapshots);
   if (totals.successful.length === 0) {
     return "目前即時報價查詢失敗，暫時無法產生持股健檢。";
@@ -2972,7 +3034,7 @@ const buildLineAgentRiskRanking = async (ownerKey) => {
     return lineAgentText.noPortfolio;
   }
 
-  const snapshots = await getPortfolioSnapshots(entries, { timeoutMs: 2500, raceMs: 3500 });
+  const snapshots = await getLineAgentPortfolioSnapshots(entries, { timeoutMs: 2500, raceMs: 3500 });
   const totals = portfolioTotals(snapshots);
   const ranked = analysisItems(totals.successful)
     .map((item) => {
