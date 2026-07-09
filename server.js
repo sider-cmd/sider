@@ -206,6 +206,8 @@ const parseTradeTypeToken = (value) => {
 const estimateBuyFee = (amount) => Math.round(amount * 0.001425);
 const estimateSellFee = (amount) => Math.round(amount * 0.001425);
 const estimateSellTax = (amount) => Math.round(amount * 0.003);
+const LINE_STOCK_PUSH_ENABLED =
+  process.env.LINE_STOCK_PUSH_ENABLED === "true";
 const ALERT_CHECK_INTERVAL_MS =
   Number(process.env.ALERT_CHECK_INTERVAL_MS) || 10 * 60 * 1000;
 const INTRADAY_PUSH_INTERVAL_MS =
@@ -9001,13 +9003,16 @@ const buildSystemDiagnostics = async () => {
     },
     schedules: {
       priceAlertsMs: ALERT_CHECK_INTERVAL_MS,
-      intradayAnalysisEnabled: INTRADAY_ANALYSIS_ENABLED,
+      lineStockPushEnabled: LINE_STOCK_PUSH_ENABLED,
+      intradayAnalysisEnabled:
+        LINE_STOCK_PUSH_ENABLED && INTRADAY_ANALYSIS_ENABLED,
       intradayAnalysisTimes: INTRADAY_ANALYSIS_TIMES,
       intradayAnomalyEnabled:
         INTRADAY_ANOMALY_ENABLED && typeof checkAndPushIntradayAnomalies === "function",
-      dailyReportEnabled: DAILY_REPORT_ENABLED,
+      dailyReportEnabled: LINE_STOCK_PUSH_ENABLED && DAILY_REPORT_ENABLED,
       dailyReportTimes: DAILY_REPORT_TIMES,
-      dailyChipMovementEnabled: DAILY_CHIP_MOVEMENT_ENABLED,
+      dailyChipMovementEnabled:
+        LINE_STOCK_PUSH_ENABLED && DAILY_CHIP_MOVEMENT_ENABLED,
       dailyChipMovementTimes: DAILY_CHIP_MOVEMENT_TIMES,
       scheduledPushCooldownMinutes: Math.round(LINE_SCHEDULED_PUSH_MIN_GAP_MS / 60000),
       alertPushCooldownMinutes: Math.round(LINE_ALERT_PUSH_MIN_GAP_MS / 60000)
@@ -9729,21 +9734,29 @@ app.listen(PORT, '0.0.0.0', () => {
     });
   }, BUTLER_REMINDER_INTERVAL_MS);
   if (hasPortfolioDb) {
-    console.log(
-      `Auto price alerts enabled. Interval: ${Math.round(
-        ALERT_CHECK_INTERVAL_MS / 1000
-      )} seconds`
-    );
-    setInterval(() => {
-      checkAndPushPriceAlerts().catch((error) => {
-        console.error("自動價格提醒排程失敗:", error);
-      });
-      checkAndPushTieredCostAlerts().catch((error) => {
-        console.error("Tiered cost alerts auto check failed:", error);
-      });
-    }, ALERT_CHECK_INTERVAL_MS);
+    if (LINE_STOCK_PUSH_ENABLED) {
+      console.log(
+        `Auto price alerts enabled. Interval: ${Math.round(
+          ALERT_CHECK_INTERVAL_MS / 1000
+        )} seconds`
+      );
+      setInterval(() => {
+        checkAndPushPriceAlerts().catch((error) => {
+          console.error("自動價格提醒排程失敗:", error);
+        });
+        checkAndPushTieredCostAlerts().catch((error) => {
+          console.error("Tiered cost alerts auto check failed:", error);
+        });
+      }, ALERT_CHECK_INTERVAL_MS);
+    } else {
+      console.log("All proactive LINE stock notifications disabled");
+    }
     console.log("Intraday portfolio briefs merged into decision analysis; standalone brief scheduler disabled");
-    if (INTRADAY_ANALYSIS_ENABLED && INTRADAY_ANALYSIS_TIMES.length > 0) {
+    if (
+      LINE_STOCK_PUSH_ENABLED &&
+      INTRADAY_ANALYSIS_ENABLED &&
+      INTRADAY_ANALYSIS_TIMES.length > 0
+    ) {
       console.log(
         `Intraday decision analysis enabled. Times: ${INTRADAY_ANALYSIS_TIMES.join(
           ", "
@@ -9758,6 +9771,7 @@ app.listen(PORT, '0.0.0.0', () => {
       console.log("Intraday decision analysis disabled");
     }
     if (
+      LINE_STOCK_PUSH_ENABLED &&
       INTRADAY_ANOMALY_ENABLED &&
       typeof checkAndPushIntradayAnomalies === "function"
     ) {
@@ -9774,17 +9788,25 @@ app.listen(PORT, '0.0.0.0', () => {
     } else {
       console.log("Intraday anomaly alerts disabled");
     }
-    console.log(
-      `Daily portfolio report scheduler enabled. Default times: ${DAILY_REPORT_TIMES.join(
-        ", "
-      ) || "none"}`
-    );
-    setInterval(() => {
-      checkAndPushDailyReports().catch((error) => {
-        console.error("Daily portfolio report schedule failed:", error);
-      });
-    }, DAILY_REPORT_INTERVAL_MS);
-    if (DAILY_CHIP_MOVEMENT_ENABLED && DAILY_CHIP_MOVEMENT_TIMES.length > 0) {
+    if (LINE_STOCK_PUSH_ENABLED && DAILY_REPORT_ENABLED) {
+      console.log(
+        `Daily portfolio report scheduler enabled. Default times: ${DAILY_REPORT_TIMES.join(
+          ", "
+        ) || "none"}`
+      );
+      setInterval(() => {
+        checkAndPushDailyReports().catch((error) => {
+          console.error("Daily portfolio report schedule failed:", error);
+        });
+      }, DAILY_REPORT_INTERVAL_MS);
+    } else {
+      console.log("Daily portfolio report scheduler disabled");
+    }
+    if (
+      LINE_STOCK_PUSH_ENABLED &&
+      DAILY_CHIP_MOVEMENT_ENABLED &&
+      DAILY_CHIP_MOVEMENT_TIMES.length > 0
+    ) {
       console.log(
         `Daily chip movement scheduler enabled. Times: ${DAILY_CHIP_MOVEMENT_TIMES.join(
           ", "
