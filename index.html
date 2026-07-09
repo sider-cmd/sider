@@ -1286,8 +1286,8 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
 
   async function pushToCloud(silent, forceReplace = false) {
     if (isSyncing) {
-      setTimeout(() => pushToCloud(silent, forceReplace), 1000);
-      return;
+      await new Promise(resolve => setTimeout(resolve, 500));
+      return pushToCloud(silent, forceReplace);
     }
     isSyncing = true;
     setSyncStatus('syncing', '同步中');
@@ -1316,11 +1316,14 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       lastSyncTime = Date.now();
       setSyncStatus('synced', '已同步');
       if (!silent) showToast('??????', 'down');
+      return true;
     } catch(e) {
       setSyncStatus('sync-error', '同步失敗');
       if (!silent) showToast('?????' + e.message, 'up');
+      return false;
+    } finally {
+      isSyncing = false;
     }
-    isSyncing = false;
   }
 
   function scheduleCloudPush() {
@@ -1341,6 +1344,21 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     state._updatedAt = Date.now();
     saveLocal();
     scheduleCloudPush();
+  }
+
+  async function saveRecordNow(successMessage) {
+    if (saveDebounceTimer) {
+      clearTimeout(saveDebounceTimer);
+      saveDebounceTimer = null;
+    }
+    const saved = await pushToCloud(true);
+    if (saved) {
+      showToast(`${successMessage}，已同步到 LINE`, 'down');
+    } else {
+      showToast('資料已保留在此裝置，但雲端同步失敗，系統會自動重試', 'up');
+      scheduleCloudPush();
+    }
+    return saved;
   }
 
   function startCloudPolling() {
@@ -3121,7 +3139,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
 
   $('cancel-trade-edit-btn').addEventListener('click', cancelTradeEdit);
 
-  $('add-trade-btn').addEventListener('click', () => {
+  $('add-trade-btn').addEventListener('click', async () => {
     const date = $('trade-date').value;
     const type = $('trade-type').value;
     const symbol = $('trade-symbol').value.trim();
@@ -3144,14 +3162,14 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       save();
       cancelTradeEdit();
       renderAll();
-      showToast('✓ 已更新交易', 'down');
+      await saveRecordNow('已更新交易');
     } else {
       state.trades.push({ id: 't_'+Date.now()+'_'+Math.random().toString(36).slice(2,7), date, type, symbol, name, shares, price, fee, tax });
       save();
       ['trade-symbol','trade-name','trade-shares','trade-price'].forEach(id => $(id).value = '');
       updateFeePreview();
       renderAll();
-      showToast('已新增', 'down');
+      await saveRecordNow('已新增交易');
       if (state.cfg.autoQuote) {
         fetchQuote(symbol).then(q => {
           if (q && q.price > 0) {
@@ -3239,7 +3257,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
 
   $('cancel-div-edit-btn').addEventListener('click', cancelDivEdit);
 
-  $('add-div-btn').addEventListener('click', () => {
+  $('add-div-btn').addEventListener('click', async () => {
     const date = $('div-date').value;
     const symbol = $('div-symbol').value.trim();
     let name = $('div-name').value.trim();
@@ -3263,7 +3281,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       save();
       cancelDivEdit();
       renderAll();
-      showToast('✓ 已更新股利', 'down');
+      await saveRecordNow('已更新股利');
     } else {
       state.dividends.push({
         id: 'd_'+Date.now()+'_'+Math.random().toString(36).slice(2,7),
@@ -3275,7 +3293,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       $('div-fee').value = 10;
       updateDivPreview();
       renderAll();
-      showToast('已新增', 'down');
+      await saveRecordNow('已新增股利');
     }
   });
 
