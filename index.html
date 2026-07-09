@@ -711,6 +711,42 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     <div class="card">
       <div class="card-header">
         <div>
+          <div class="card-title">Sider AI Platform</div>
+          <div class="muted" id="ai-platform-policy" style="font-size:12px;margin-top:4px;">載入成本保護狀態</div>
+        </div>
+        <button class="btn btn-sm btn-ghost" id="ai-platform-refresh-btn">重新整理</button>
+      </div>
+      <div class="butler-grid">
+        <div class="note" style="margin:0;"><span class="muted">目前模式</span><br><strong id="ai-platform-mode">manual</strong></div>
+        <div class="note" style="margin:0;"><span class="muted">Dispatcher</span><br><strong id="ai-platform-dispatcher">API Last</strong></div>
+        <div class="note" style="margin:0;"><span class="muted">DRY RUN</span><br><strong id="ai-platform-dry-run">true</strong></div>
+        <div class="note" style="margin:0;"><span class="muted">成本保護</span><br><strong id="ai-platform-cost-protection">啟用</strong></div>
+      </div>
+      <div class="butler-list" id="ai-provider-status"></div>
+      <div class="form-grid" style="margin-top:12px;">
+        <div class="field">
+          <label>訂閱服務</label>
+          <select id="ai-prompt-provider">
+            <option value="claude">Claude</option>
+            <option value="gemini">Gemini</option>
+            <option value="openai">ChatGPT</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>任務</label>
+          <textarea id="ai-platform-task" placeholder="輸入要交給訂閱版 AI 處理的任務"></textarea>
+        </div>
+      </div>
+      <div class="btn-row" style="margin-top:10px;">
+        <button class="btn" id="ai-generate-prompt-btn">產生 Prompt</button>
+        <button class="btn btn-ghost" id="ai-copy-prompt-btn">複製</button>
+      </div>
+      <div class="butler-output" id="ai-platform-prompt-output" style="margin-top:12px;min-height:90px;">尚未產生 Prompt</div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
           <div class="card-title">AI 個人管家</div>
           <div class="muted" style="font-size:12px;margin-top:4px;">Web、LINE、手機捷徑共用同一份管家記憶</div>
         </div>
@@ -3515,11 +3551,73 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
       : '已載入｜尚未累積管家互動';
   }
 
+  function providerStatusLabel(provider) {
+    const labels = {
+      subscription_available: '訂閱可用',
+      api_configured: 'API 已設定',
+      api_disabled: 'API 已關閉',
+      api_required_but_missing: '需要 API 但尚未設定'
+    };
+    return labels[provider?.status] || provider?.status || '未知';
+  }
+
+  function renderAiPlatformStatus(data) {
+    $('ai-platform-mode').textContent = data.mode || 'manual';
+    $('ai-platform-dispatcher').textContent = data.apiLast ? 'API Last' : '未啟用';
+    $('ai-platform-dry-run').textContent = String(data.dryRun !== false);
+    $('ai-platform-cost-protection').textContent = data.costProtection ? '啟用' : '需確認';
+    $('ai-platform-cost-protection').style.color = data.costProtection ? 'var(--down)' : 'var(--warn)';
+    $('ai-platform-policy').textContent = data.costProtection
+      ? 'Subscription First｜付費 API 預設封鎖'
+      : 'API 費用操作需要明確確認';
+    $('ai-provider-status').innerHTML = Object.entries(data.providers || {}).map(([name, provider]) =>
+      `<div class="butler-item"><strong>${escapeHtml(name.toUpperCase())}</strong>｜${escapeHtml(providerStatusLabel(provider))}｜訂閱 ${provider.subscriptionAvailable ? '可用' : '未標記'}</div>`
+    ).join('');
+  }
+
+  async function refreshAiPlatformStatus() {
+    try {
+      const data = await lineSyncRequest('/api/ai-platform/status');
+      renderAiPlatformStatus(data);
+    } catch (error) {
+      $('ai-platform-policy').textContent = '成本保護狀態載入失敗：' + error.message;
+      $('ai-platform-policy').style.color = 'var(--up)';
+    }
+  }
+
+  async function generateSubscriptionPrompt() {
+    const task = $('ai-platform-task').value.trim();
+    if (!task) {
+      showToast('請輸入任務');
+      return;
+    }
+    $('ai-generate-prompt-btn').disabled = true;
+    try {
+      const data = await lineSyncRequest('/api/ai-platform/prompt', {
+        method: 'POST',
+        body: JSON.stringify({
+          task,
+          provider: $('ai-prompt-provider').value,
+          mode: 'assisted'
+        })
+      });
+      $('ai-platform-prompt-output').textContent = data.prompt || '';
+      showToast('Prompt 已產生', 'down');
+    } catch (error) {
+      $('ai-platform-prompt-output').textContent = 'Prompt 產生失敗：' + error.message;
+    } finally {
+      $('ai-generate-prompt-btn').disabled = false;
+    }
+  }
+
   async function refreshButlerPanel() {
     const status = $('butler-status');
     status.textContent = '載入管家記憶中...';
     try {
-      const data = await lineSyncRequest('/api/butler/memory');
+      const [data] = await Promise.all([
+        lineSyncRequest('/api/butler/memory'),
+        refreshAiPlatformStatus()
+      ]);
       renderButlerState(data);
     } catch (error) {
       status.textContent = '管家記憶載入失敗：' + error.message;
@@ -3741,6 +3839,14 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   $('line-pull-btn').addEventListener('click', pullLineStateToWeb);
   $('sync-indicator').addEventListener('click', () => pullFromCloud(false));
   $('butler-refresh-btn').addEventListener('click', refreshButlerPanel);
+  $('ai-platform-refresh-btn').addEventListener('click', refreshAiPlatformStatus);
+  $('ai-generate-prompt-btn').addEventListener('click', generateSubscriptionPrompt);
+  $('ai-copy-prompt-btn').addEventListener('click', async () => {
+    const text = $('ai-platform-prompt-output').textContent;
+    if (!text || text === '尚未產生 Prompt') return;
+    await navigator.clipboard?.writeText(text);
+    showToast('Prompt 已複製', 'down');
+  });
   $('butler-send-btn').addEventListener('click', () => sendButlerMessage());
   $('butler-message').addEventListener('keydown', event => {
     if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') sendButlerMessage();
