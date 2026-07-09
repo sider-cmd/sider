@@ -8853,6 +8853,32 @@ const mergeWebCloudState = (incomingState = {}, existingState = {}) => ({
   _updatedAt: Date.now()
 });
 
+const webRecordSetSignature = (records = []) =>
+  [...records]
+    .map((record) => webRecordContentKey(record))
+    .filter(Boolean)
+    .sort()
+    .join("\n");
+
+const webPortfolioRecordsChanged = (nextState = {}, previousState = {}) =>
+  webRecordSetSignature(nextState.trades || []) !==
+    webRecordSetSignature(previousState.trades || []) ||
+  webRecordSetSignature(nextState.dividends || []) !==
+    webRecordSetSignature(previousState.dividends || []);
+
+const syncWebStateToPortfolioDb = async (ownerKey, webState = {}) => {
+  const { portfolio, trades } = buildPortfolioFromWebState(webState);
+  const dividends = normalizeWebDividends(webState.dividends || []);
+  await replacePortfolio(ownerKey, portfolio);
+  await replaceTradesFromWeb(ownerKey, trades);
+  await replaceDividendsFromWeb(ownerKey, dividends);
+  return {
+    holdings: portfolio.size,
+    trades: trades.length,
+    dividends: dividends.length
+  };
+};
+
 const cloudLineId = (id) => {
   const value = String(id || "");
   return value.startsWith("line_") ? `cloud_${value}` : value;
@@ -9175,12 +9201,17 @@ app.put('/api/cloud-state', requireWebSyncToken, async (req, res) => {
   let supabaseError;
   try {
     const ownerKey = await getWebSyncOwnerKey();
+    const existingState = await getSupabaseWebCloudState(ownerKey).catch(() => null);
     if (!forceReplace) {
-      const existingState = await getSupabaseWebCloudState(ownerKey).catch(() => null);
       if (existingState) {
         state = mergeWebCloudState(state, existingState);
       }
     }
+    const portfolioChanged =
+      forceReplace || !existingState || webPortfolioRecordsChanged(state, existingState);
+    const syncedCounts = portfolioChanged
+      ? await syncWebStateToPortfolioDb(ownerKey, state)
+      : null;
     await saveSupabaseWebCloudState(ownerKey, state);
 
     if (hasCloudState) {
@@ -9195,7 +9226,9 @@ app.put('/api/cloud-state', requireWebSyncToken, async (req, res) => {
     return res.json({
       ok: true,
       source: "supabase",
-      updatedAt: state._updatedAt || Date.now()
+      updatedAt: state._updatedAt || Date.now(),
+      portfolioSynced: Boolean(syncedCounts),
+      counts: syncedCounts || undefined
     });
   } catch (error) {
     supabaseError = error;
