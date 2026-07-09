@@ -5,7 +5,22 @@ const { OpenAI } = require('openai');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const BOT_BUILD_VERSION = "2026-07-07 BUTLER-GEMINI-3";
+const BOT_BUILD_VERSION = "2026-07-09 SUBSCRIPTION-FIRST-1";
+const AI_MODES = Object.freeze({
+  MANUAL: "manual",
+  ASSISTED: "assisted",
+  AUTO: "auto"
+});
+const normalizeAiMode = (value) => {
+  const mode = String(value || "").trim().toLowerCase().replace(/_mode$/, "");
+  return Object.values(AI_MODES).includes(mode) ? mode : AI_MODES.MANUAL;
+};
+const AI_PLATFORM_MODE = normalizeAiMode(process.env.AI_PLATFORM_MODE);
+const DRY_RUN = process.env.DRY_RUN !== "false";
+const OPENAI_API_ENABLED = process.env.OPENAI_API_ENABLED === "true";
+const CLAUDE_API_ENABLED = process.env.CLAUDE_API_ENABLED === "true";
+const GEMINI_API_ENABLED = process.env.GEMINI_API_ENABLED === "true";
+const aiDispatchCache = new Map();
 
 // =================【1. LINE & OpenAI 設定】=================
 const config = {
@@ -16,6 +31,12 @@ const config = {
 const client = new line.Client(config);
 let openaiClient;
 const getOpenAIClient = () => {
+  if (!OPENAI_API_ENABLED) {
+    throw new Error("OpenAI API is disabled by Subscription First policy");
+  }
+  if (DRY_RUN) {
+    throw new Error("OpenAI API blocked because DRY_RUN=true");
+  }
   if (!process.env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY is not configured");
   }
@@ -64,6 +85,87 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const GEMINI_API_BASE_URL =
   (process.env.GEMINI_API_BASE_URL || "https://generativelanguage.googleapis.com").replace(/\/$/, "");
+
+const providerStatus = (provider, { required = false } = {}) => {
+  const settings = {
+    openai: {
+      enabled: OPENAI_API_ENABLED,
+      configured: Boolean(process.env.OPENAI_API_KEY),
+      subscriptionAvailable: process.env.CHATGPT_SUBSCRIPTION_AVAILABLE !== "false"
+    },
+    claude: {
+      enabled: CLAUDE_API_ENABLED,
+      configured: Boolean(process.env.ANTHROPIC_API_KEY),
+      subscriptionAvailable: process.env.CLAUDE_SUBSCRIPTION_AVAILABLE !== "false"
+    },
+    gemini: {
+      enabled: GEMINI_API_ENABLED,
+      configured: Boolean(GEMINI_API_KEY),
+      subscriptionAvailable: process.env.GEMINI_SUBSCRIPTION_AVAILABLE !== "false"
+    }
+  }[provider];
+  if (!settings) return { status: "api_required_but_missing", subscriptionAvailable: false };
+  let status = "subscription_available";
+  if (!settings.enabled) status = "api_disabled";
+  else if (settings.configured) status = "api_configured";
+  else if (required) status = "api_required_but_missing";
+  return {
+    status,
+    subscriptionAvailable: settings.subscriptionAvailable,
+    apiConfigured: settings.configured,
+    apiEnabled: settings.enabled
+  };
+};
+
+const aiPlatformStatus = () => ({
+  mode: AI_PLATFORM_MODE,
+  modes: Object.values(AI_MODES),
+  dryRun: DRY_RUN,
+  apiLast: true,
+  costProtection: DRY_RUN || AI_PLATFORM_MODE !== AI_MODES.AUTO,
+  apiConfirmationRequired: true,
+  localCodex: {
+    available: true,
+    execution: "workspace"
+  },
+  providers: {
+    openai: providerStatus("openai"),
+    claude: providerStatus("claude"),
+    gemini: providerStatus("gemini")
+  },
+  dispatchOrder: ["cache", "ai_memory", "local_codex", "manual_prompt", "api"]
+});
+
+const buildSubscriptionPrompt = ({ provider = "claude", task, context = "" }) => {
+  const providerName =
+    provider === "gemini" ? "Gemini" : provider === "openai" ? "ChatGPT" : "Claude";
+  return `請將以下內容貼到 ${providerName} 網頁版：
+
+---
+你是 Sider AI Platform 的協作 AI。請使用繁體中文，先給結論，再列出可執行步驟、風險與驗證方式。
+
+任務：
+${String(task || "").trim()}
+
+${context ? `既有脈絡與 AI Memory：\n${String(context).trim()}\n\n` : ""}限制：
+1. 不要假設可以呼叫付費 API。
+2. 不要刪除資料或執行不可逆操作。
+3. 若資訊不足，明確列出缺口。
+4. 回覆需可直接交回 Sider AI Platform 繼續執行。
+---`;
+};
+
+const aiApiPermission = ({ mode, autoMode, apiConfirmed, unattended = false }) => {
+  const requestedMode = normalizeAiMode(mode || AI_PLATFORM_MODE);
+  if (DRY_RUN) return { allowed: false, reason: "dry_run" };
+  if (requestedMode !== AI_MODES.AUTO) return { allowed: false, reason: "not_auto_mode" };
+  if (!autoMode) return { allowed: false, reason: "auto_mode_required" };
+  if (!apiConfirmed) return { allowed: false, reason: "api_cost_confirmation_required" };
+  if (!unattended && apiConfirmed !== true) {
+    return { allowed: false, reason: "api_cost_confirmation_required" };
+  }
+  return { allowed: true, reason: "confirmed" };
+};
 
 const jsonBinUrl = (suffix = "") =>
   `https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}${suffix}`;
@@ -2663,19 +2765,7 @@ const geminiErrorMessage = (error) => {
   return error?.message || "Gemini API request failed";
 };
 
-const callGeminiText = async (prompt, options = {}) => {
-  if (!GEMINI_API_KEY) {
-    return `Gemini 尚未啟用。
-
-請在 Railway Variables 新增：
-GEMINI_API_KEY=你的 Google AI Studio API Key
-
-可選：
-GEMINI_MODEL=${GEMINI_MODEL}
-
-設定後重新部署，管家就能用 Gemini 做長文整理、交叉檢查與第二意見。`;
-  }
-
+const callGeminiApiText = async (prompt, options = {}) => {
   const model = normalizeGeminiModelName(options.model);
   let response;
   try {
@@ -2715,6 +2805,125 @@ GEMINI_MODEL=${GEMINI_MODEL}
   return text || "Gemini 沒有回傳可讀文字，請稍後再試。";
 };
 
+const aiMemoryContext = (ownerKey, task) => {
+  const memory = lineAgentInteractionMemory.get(ownerKey);
+  const recent = Array.isArray(memory?.recent) ? memory.recent : [];
+  const normalizedTask = String(task || "").toLowerCase();
+  const related = recent
+    .filter((item) => {
+      const input = String(item.input || "").toLowerCase();
+      return input && (normalizedTask.includes(input) || input.includes(normalizedTask));
+    })
+    .slice(0, 3);
+  const rows = (related.length ? related : recent.slice(0, 5)).map(
+    (item) => `${item.at || ""}｜${item.type || "task"}｜${item.input || ""}`
+  );
+  return rows.join("\n");
+};
+
+const dispatchAiTask = async ({
+  ownerKey,
+  task,
+  provider = "claude",
+  mode = AI_PLATFORM_MODE,
+  autoMode = false,
+  apiConfirmed = false,
+  unattended = false,
+  localResult = "",
+  system,
+  ...providerOptions
+}) => {
+  const cleanTask = String(task || "").trim();
+  if (!cleanTask) throw new Error("task is required");
+  const requestedMode = normalizeAiMode(mode);
+  const cacheKey = `${provider}|${cleanTask}`;
+  const cached = aiDispatchCache.get(cacheKey);
+  if (cached) {
+    return { ...cached, source: "cache", cacheHit: true };
+  }
+
+  const memory = aiMemoryContext(ownerKey, cleanTask);
+  if (localResult) {
+    const result = {
+      ok: true,
+      mode: requestedMode,
+      source: "local_codex",
+      text: String(localResult),
+      memoryUsed: Boolean(memory),
+      apiCalled: false
+    };
+    aiDispatchCache.set(cacheKey, result);
+    return result;
+  }
+
+  const prompt = buildSubscriptionPrompt({
+    provider,
+    task: cleanTask,
+    context: memory
+  });
+  const permission = aiApiPermission({
+    mode: requestedMode,
+    autoMode,
+    apiConfirmed,
+    unattended
+  });
+  const status = providerStatus(provider, { required: permission.allowed });
+  if (
+    !permission.allowed ||
+    status.status !== "api_configured" ||
+    provider !== "gemini"
+  ) {
+    return {
+      ok: true,
+      mode: requestedMode,
+      source: "manual_prompt",
+      prompt,
+      text: prompt,
+      memoryUsed: Boolean(memory),
+      apiCalled: false,
+      apiBlockedReason:
+        permission.allowed && provider !== "gemini"
+          ? "provider_api_not_implemented"
+          : permission.allowed
+            ? status.status
+            : permission.reason
+    };
+  }
+
+  const text = await callGeminiApiText(cleanTask, {
+    system,
+    ...providerOptions
+  });
+  const result = {
+    ok: true,
+    mode: requestedMode,
+    source: "api",
+    provider,
+    text,
+    memoryUsed: Boolean(memory),
+    apiCalled: true
+  };
+  aiDispatchCache.set(cacheKey, result);
+  return result;
+};
+
+const callGeminiText = async (prompt, options = {}) => {
+  const result = await dispatchAiTask({
+    ownerKey: options.ownerKey,
+    task: prompt,
+    provider: "gemini",
+    mode: options.mode,
+    autoMode: options.autoMode === true,
+    apiConfirmed: options.apiConfirmed === true,
+    unattended: options.unattended === true,
+    system: options.system,
+    temperature: options.temperature,
+    maxOutputTokens: options.maxOutputTokens,
+    timeoutMs: options.timeoutMs
+  });
+  return result.text;
+};
+
 const buildButlerContextForGemini = async (ownerKey) => {
   const state = await getButlerStateSnapshot(ownerKey).catch(() => null);
   if (!state) return "管家狀態：暫時無法讀取。";
@@ -2750,6 +2959,7 @@ const buildGeminiButlerReply = async (ownerKey, input) => {
 ${task}
 
 請用繁體中文回答。若是整理文章或資料，請輸出重點、可行動建議、風險或限制。`, {
+    ownerKey,
     maxOutputTokens: 1800
   });
   return toLineSafeText(`Gemini 管家回覆
@@ -2773,6 +2983,7 @@ ${baseReport}
 2. 可能忽略的風險
 3. 買進、續抱、減碼、停利或停損的條件式建議
 4. 明確提醒：不可視為自動交易指令`, {
+    ownerKey,
     temperature: 0.25,
     maxOutputTokens: 1800
   });
@@ -8719,7 +8930,8 @@ app.get('/health', (req, res) => {
     version: BOT_BUILD_VERSION,
     portfolioDb: hasPortfolioDb,
     cloudState: hasCloudState,
-    finMind: Boolean(FINMIND_TOKEN)
+    finMind: Boolean(FINMIND_TOKEN),
+    aiPlatform: aiPlatformStatus()
   });
 });
 
@@ -9428,6 +9640,52 @@ app.post('/api/cloud-state/repair', requireConfiguredWebSyncToken, async (req, r
       ok: false,
       error: serviceErrorMessage(error)
     });
+  }
+});
+
+app.get('/api/ai-platform/status', requireWebSyncToken, (req, res) => {
+  res.json({ ok: true, ...aiPlatformStatus() });
+});
+
+app.post('/api/ai-platform/prompt', requireWebSyncToken, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const task = String(req.body?.task || req.body?.text || "").trim();
+    const provider = String(req.body?.provider || "claude").trim().toLowerCase();
+    if (!task) return res.status(400).json({ ok: false, error: "task is required" });
+    res.json({
+      ok: true,
+      mode: normalizeAiMode(req.body?.mode || AI_PLATFORM_MODE),
+      provider,
+      source: "manual_prompt",
+      prompt: buildSubscriptionPrompt({
+        provider,
+        task,
+        context: aiMemoryContext(ownerKey, task)
+      }),
+      apiCalled: false
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
+  }
+});
+
+app.post('/api/ai-platform/dispatch', requireWebSyncToken, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const result = await dispatchAiTask({
+      ownerKey,
+      task: req.body?.task || req.body?.text,
+      provider: String(req.body?.provider || "claude").trim().toLowerCase(),
+      mode: req.body?.mode || AI_PLATFORM_MODE,
+      autoMode: req.body?.auto_mode === true,
+      apiConfirmed: req.body?.api_confirmed === true,
+      unattended: req.body?.unattended === true,
+      localResult: req.body?.local_result || ""
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ ok: false, error: serviceErrorMessage(error) });
   }
 });
 
