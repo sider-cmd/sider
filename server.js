@@ -10000,8 +10000,6 @@ app.get('/intraday/anomaly/check', requireConfiguredWebSyncToken, async (req, re
 
 // =================【外部股票工作流整合】=================
 const INTEGRATION_WEBHOOK_SECRET = String(process.env.INTEGRATION_WEBHOOK_SECRET || "").trim();
-const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
-const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || "").trim();
 const GOOGLE_SHEETS_WEBHOOK_URL = String(process.env.GOOGLE_SHEETS_WEBHOOK_URL || "").trim();
 const N8N_SENTIMENT_WEBHOOK_URL = String(process.env.N8N_SENTIMENT_WEBHOOK_URL || "").trim();
 
@@ -10020,19 +10018,11 @@ const requireIntegrationSecret = (req, res, next) => {
 
 const pushWorkflowNotification = async (text) => {
   const message = String(text || "").trim().slice(0, 4900);
-  if (!message) return { line: false, telegram: false };
-  const result = { line: false, telegram: false };
+  if (!message) return { line: false };
+  const result = { line: false };
   const ownerKey = await getWebSyncOwnerKey();
   await client.pushMessage(ownerKey, { type: "text", text: message });
   result.line = true;
-  if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
-    await axios.post(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-      { chat_id: TELEGRAM_CHAT_ID, text: message },
-      { timeout: 8000 }
-    );
-    result.telegram = true;
-  }
   return result;
 };
 
@@ -10077,8 +10067,7 @@ app.get('/api/integrations/status', requireWebSyncToken, (req, res) => {
       tradingview: {
         receiver: true,
         webhookSecret: Boolean(INTEGRATION_WEBHOOK_SECRET),
-        line: true,
-        telegram: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID)
+        line: true
       },
       chip: {
         provider: "FinMind",
@@ -10093,7 +10082,7 @@ app.get('/api/integrations/status', requireWebSyncToken, (req, res) => {
         receiver: true,
         n8n: Boolean(N8N_SENTIMENT_WEBHOOK_URL),
         webhookSecret: Boolean(INTEGRATION_WEBHOOK_SECRET),
-        telegram: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID)
+        line: true
       }
     }
   });
@@ -10149,7 +10138,7 @@ app.post('/api/integrations/finmind-sheets/run', requireIntegrationSecret, async
       await Promise.all(
         [...holdings.entries()].map(async ([symbol, position]) => {
           try {
-            return await fetchInstitutionalHistory20(symbol, position.name);
+            return await fetchInstitutionalHistory20(symbol, stockNames[symbol] || symbol);
           } catch (error) {
             console.error(`FinMind history fetch failed for ${symbol}:`, serviceErrorMessage(error));
             return [];
