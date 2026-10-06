@@ -1160,22 +1160,28 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
   }
 
   function mergeRecords(localRecords = [], cloudRecords = []) {
-    const combinedRecords = [...cloudRecords, ...localRecords];
-    const contentKeysCoveredByLineIds = new Set(
-      combinedRecords
-        .filter(record => normalizedRecordId(record))
-        .map(record => recordContentKey(record))
-    );
-    const byKey = new Map();
-    combinedRecords.forEach(record => {
-      const normalizedId = normalizedRecordId(record);
-      const contentKey = recordContentKey(record);
-      if (!normalizedId && contentKeysCoveredByLineIds.has(contentKey)) return;
-      const key = normalizedId || contentKey;
-      if (!key || key === '||||0|0|0|0|0|0') return;
-      byKey.set(key, record);
+    const groupByContent = records => {
+      const groups = new Map();
+      records.forEach(record => {
+        const key = recordContentKey(record);
+        if (!key || key === '||||0|0|0|0|0|0') return;
+        const group = groups.get(key) || [];
+        group.push(record);
+        groups.set(key, group);
+      });
+      return groups;
+    };
+    const localGroups = groupByContent(localRecords);
+    const cloudGroups = groupByContent(cloudRecords);
+    const keys = new Set([...localGroups.keys(), ...cloudGroups.keys()]);
+    const merged = [];
+    keys.forEach(key => {
+      const localGroup = localGroups.get(key) || [];
+      const cloudGroup = cloudGroups.get(key) || [];
+      const preferred = localGroup.length >= cloudGroup.length ? localGroup : cloudGroup;
+      merged.push(...preferred);
     });
-    return [...byKey.values()].sort((a, b) => {
+    return merged.sort((a, b) => {
       const dateCompare = String(a.date || '').localeCompare(String(b.date || ''));
       if (dateCompare !== 0) return dateCompare;
       return String(a.id || '').localeCompare(String(b.id || ''));

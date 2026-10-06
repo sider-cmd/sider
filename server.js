@@ -8999,22 +8999,28 @@ const webRecordKey = (record = {}) =>
   normalizedWebRecordId(record) || webRecordContentKey(record);
 
 const mergeWebRecords = (incomingRecords = [], existingRecords = []) => {
-  const combinedRecords = [...existingRecords, ...incomingRecords];
-  const contentKeysCoveredByLineIds = new Set(
-    combinedRecords
-      .filter((record) => normalizedWebRecordId(record))
-      .map((record) => webRecordContentKey(record))
-  );
-  const records = new Map();
-  combinedRecords.forEach((record) => {
-    const normalizedId = normalizedWebRecordId(record);
-    const contentKey = webRecordContentKey(record);
-    if (!normalizedId && contentKeysCoveredByLineIds.has(contentKey)) return;
-    const key = normalizedId || contentKey;
-    if (!key || key === "||||0|0|0|0|0|0") return;
-    records.set(key, record);
+  const groupByContent = (records = []) => {
+    const groups = new Map();
+    records.forEach((record) => {
+      const key = webRecordContentKey(record);
+      if (!key || key === "||||0|0|0|0|0|0") return;
+      const group = groups.get(key) || [];
+      group.push(record);
+      groups.set(key, group);
+    });
+    return groups;
+  };
+  const incomingGroups = groupByContent(incomingRecords);
+  const existingGroups = groupByContent(existingRecords);
+  const keys = new Set([...incomingGroups.keys(), ...existingGroups.keys()]);
+  const merged = [];
+  keys.forEach((key) => {
+    const incomingGroup = incomingGroups.get(key) || [];
+    const existingGroup = existingGroups.get(key) || [];
+    const preferred = incomingGroup.length >= existingGroup.length ? incomingGroup : existingGroup;
+    merged.push(...preferred);
   });
-  return [...records.values()].sort((a, b) => {
+  return merged.sort((a, b) => {
     const dateCompare = String(a.date || "").localeCompare(String(b.date || ""));
     if (dateCompare !== 0) return dateCompare;
     return String(a.id || "").localeCompare(String(b.id || ""));
