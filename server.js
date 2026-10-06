@@ -467,15 +467,27 @@ const getPortfolioOwnerKeys = async () => {
     return [...portfolios.keys()];
   }
 
-  const response = await axios.get(portfolioApiUrl(), {
-    headers: supabaseHeaders(),
-    params: {
-      select: "owner_key",
-      limit: 1000
-    }
-  });
+  // Positions can be temporarily empty during a replace operation. Trades and
+  // dividends are equally valid sources for discovering the existing owner.
+  const responses = await Promise.all(
+    [portfolioApiUrl(), tradeApiUrl(), dividendApiUrl()].map((url) =>
+      axios.get(url, {
+        headers: supabaseHeaders(),
+        params: {
+          select: "owner_key",
+          limit: 1000
+        }
+      }).catch(() => ({ data: [] }))
+    )
+  );
 
-  return [...new Set((response.data || []).map((row) => row.owner_key).filter(Boolean))];
+  return [
+    ...new Set(
+      responses.flatMap((response) => response.data || [])
+        .map((row) => row.owner_key)
+        .filter(Boolean)
+    )
+  ];
 };
 
 const savePortfolioPosition = async (ownerKey, code, position) => {
