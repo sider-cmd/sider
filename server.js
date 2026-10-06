@@ -10138,7 +10138,7 @@ app.post('/api/integrations/finmind-sheets/run', requireIntegrationSecret, async
       await Promise.all(
         [...holdings.entries()].map(async ([symbol, position]) => {
           try {
-            return await fetchInstitutionalHistory20(symbol, stockNames[symbol] || symbol);
+            return await fetchInstitutionalHistory20(symbol, dailyName(symbol));
           } catch (error) {
             console.error(`FinMind history fetch failed for ${symbol}:`, serviceErrorMessage(error));
             return [];
