@@ -3941,7 +3941,7 @@ const fetchInstitutionalChipSummary = async (code) => {
   try {
     const response = await axios.get(
       `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id=${code}&start_date=${intradayAnalysisStartDate(14)}`,
-      { headers: { Authorization: `Bearer ${FINMIND_TOKEN}` }, timeout: 5000 }
+      { timeout: 5000 }
     );
     const rows = response.data?.data || [];
     if (rows.length === 0) {
@@ -10050,7 +10050,7 @@ const postGoogleSheetWorkflow = async (payload) => {
 const fetchInstitutionalHistory20 = async (symbol, name) => {
   const response = await axios.get(
     `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id=${symbol}&start_date=${intradayAnalysisStartDate(45)}`,
-    { headers: { Authorization: `Bearer ${FINMIND_TOKEN}` }, timeout: 10000 }
+    { timeout: 10000 }
   );
   const dates = new Map();
   for (const item of response.data?.data || []) {
