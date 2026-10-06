@@ -10036,6 +10036,39 @@ const pushWorkflowNotification = async (text) => {
   return result;
 };
 
+const postGoogleSheetWorkflow = async (payload) => {
+  if (!GOOGLE_SHEETS_WEBHOOK_URL) return { configured: false, accepted: false };
+  try {
+    const response = await axios.post(GOOGLE_SHEETS_WEBHOOK_URL, payload, { timeout: 15000 });
+    return { configured: true, accepted: response.status >= 200 && response.status < 300 };
+  } catch (error) {
+    console.error("Google Sheets workflow write failed:", serviceErrorMessage(error));
+    return { configured: true, accepted: false, error: serviceErrorMessage(error) };
+  }
+};
+
+const fetchInstitutionalHistory20 = async (symbol, name) => {
+  const response = await axios.get(
+    `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id=${symbol}&start_date=${intradayAnalysisStartDate(45)}`,
+    { headers: { Authorization: `Bearer ${FINMIND_TOKEN}` }, timeout: 10000 }
+  );
+  const dates = new Map();
+  for (const item of response.data?.data || []) {
+    const date = String(item.date || "");
+    if (!date) continue;
+    const row = dates.get(date) || { date, symbol, name: name || symbol, foreign: 0, trust: 0, dealer: 0, total: 0 };
+    const netLots = (Number(item.buy || 0) - Number(item.sell || 0)) / 1000;
+    if (item.name === "Foreign_Investor") row.foreign += netLots;
+    if (item.name === "Investment_Trust") row.trust += netLots;
+    if (item.name === "Dealer_self" || item.name === "Dealer_Hedging") row.dealer += netLots;
+    dates.set(date, row);
+  }
+  return [...dates.values()]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-20)
+    .map((row) => ({ ...row, total: row.foreign + row.trust + row.dealer }));
+};
+
 app.get('/api/integrations/status', requireWebSyncToken, (req, res) => {
   res.json({
     ok: true,
@@ -10075,7 +10108,10 @@ app.post('/api/integrations/tradingview/webhook', requireIntegrationSecret, asyn
     const notification = await pushWorkflowNotification(
       `TradingView 警示\n\n標的：${symbol}\n條件：${condition}${price > 0 ? `\n價格：${price}` : ""}${timeframe ? `\n週期：${timeframe}` : ""}`
     );
-    res.json({ ok: true, symbol, notification });
+    const sheet = await postGoogleSheetWorkflow({
+      type: "alert", source: "TradingView", symbol, condition, price, timeframe, delivery: "LINE 已通知"
+    });
+    res.json({ ok: true, symbol, notification, sheet });
   } catch (error) {
     res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
   }
@@ -10091,7 +10127,11 @@ app.post('/api/integrations/sentiment/webhook', requireIntegrationSecret, async 
     const notification = await pushWorkflowNotification(
       `PTT／Dcard 情緒日報\n\n標的：${symbol}\n情緒：${label}${Number.isFinite(score) ? `（${score}）` : ""}${posts > 0 ? `\n樣本：${posts} 篇` : ""}${summary ? `\n摘要：${summary}` : ""}`
     );
-    res.json({ ok: true, symbol, notification });
+    const sheet = await postGoogleSheetWorkflow({
+      type: "sentiment", source: req.body?.source || "PTT／Dcard", symbol, label, score, posts,
+      summary, title: req.body?.title || "", url: req.body?.url || ""
+    });
+    res.json({ ok: true, symbol, notification, sheet });
   } catch (error) {
     res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
   }
@@ -10105,13 +10145,26 @@ app.post('/api/integrations/finmind-sheets/run', requireIntegrationSecret, async
     const ownerKey = await getWebSyncOwnerKey();
     const report = await buildDailyChipMovementReport(ownerKey);
     const holdings = await getPortfolio(ownerKey);
+    const rows = (
+      await Promise.all(
+        [...holdings.entries()].map(async ([symbol, position]) => {
+          try {
+            return await fetchInstitutionalHistory20(symbol, position.name);
+          } catch (error) {
+            console.error(`FinMind history fetch failed for ${symbol}:`, serviceErrorMessage(error));
+            return [];
+          }
+        })
+      )
+    ).flat().sort((a, b) => a.date.localeCompare(b.date) || a.symbol.localeCompare(b.symbol));
     const payload = {
       generatedAt: new Date().toISOString(),
       report,
+      rows,
       holdings: [...holdings.entries()].map(([symbol, position]) => ({ symbol, ...position }))
     };
     const response = await axios.post(GOOGLE_SHEETS_WEBHOOK_URL, payload, { timeout: 15000 });
-    res.json({ ok: true, rows: payload.holdings.length, sheetAccepted: response.status >= 200 && response.status < 300 });
+    res.json({ ok: true, holdings: payload.holdings.length, rows: payload.rows.length, sheetAccepted: response.status >= 200 && response.status < 300 });
   } catch (error) {
     res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
   }
