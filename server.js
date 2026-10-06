@@ -8661,6 +8661,15 @@ const buildPortfolioFromWebState = (webState = {}) => {
     }
   }
 
+  for (const [rawCode, override] of Object.entries(webState.holdingOverrides || {})) {
+    const code = normalizeWebCode(rawCode);
+    const shares = Number(override?.shares);
+    if (!code || !Number.isFinite(shares) || shares < 0) continue;
+    const current = running.get(code) || { shares: 0, totalCost: 0 };
+    current.shares = shares;
+    running.set(code, current);
+  }
+
   for (const [code, position] of running.entries()) {
     if (position.shares > 0 && !isExcluded(code)) {
       portfolio.set(code, {
@@ -9067,6 +9076,10 @@ const mergeWebCloudState = (incomingState = {}, existingState = {}) => ({
   prices: { ...(existingState.prices || {}), ...(incomingState.prices || {}) },
   priceUpdated: { ...(existingState.priceUpdated || {}), ...(incomingState.priceUpdated || {}) },
   customNames: { ...(existingState.customNames || {}), ...(incomingState.customNames || {}) },
+  holdingOverrides: {
+    ...(existingState.holdingOverrides || {}),
+    ...(incomingState.holdingOverrides || {})
+  },
   excludedSymbols: normalizeExcludedWebSymbols({
     ...(existingState.excludedSymbols || {}),
     ...(incomingState.excludedSymbols || {})

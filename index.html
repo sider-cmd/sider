@@ -1111,6 +1111,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     s.prices = s.prices || {};
     s.priceUpdated = s.priceUpdated || {};
     s.snapshots = s.snapshots || [];
+    s.holdingOverrides = s.holdingOverrides || {};
     s.cfg = { ...DEFAULT_CFG, ...(s.cfg || {}) };
     s.customNames = Object.fromEntries(
       Object.entries(s.customNames || {})
@@ -1302,6 +1303,7 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
           cfg: {...DEFAULT_CFG, ...(cloudData.cfg || {})},
           customNames: cloudData.customNames || {},
           excludedSymbols: mergeExcludedSymbols(state.excludedSymbols || {}, cloudData.excludedSymbols || {}),
+          holdingOverrides: cloudData.holdingOverrides || {},
           aiSummary: cloudData.aiSummary || state.aiSummary || null,
           portfolioDataVersion: cloudData.portfolioDataVersion || PORTFOLIO_DATA_VERSION,
           _updatedAt: cloudTime
@@ -1659,6 +1661,20 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
     for (const d of source.dividends) {
       if (!by[d.symbol]) continue;
       by[d.symbol].shares += (d.shares * (d.stock||0)) / 10;
+    }
+    for (const [symbol, override] of Object.entries(source.holdingOverrides || {})) {
+      const shares = Number(override?.shares);
+      if (!Number.isFinite(shares) || shares < 0) continue;
+      if (!by[symbol]) {
+        by[symbol] = {
+          symbol,
+          name: cleanStockName(symbol, override?.name) || lookupName(symbol),
+          shares: 0,
+          totalCost: 0,
+          realized: 0
+        };
+      }
+      by[symbol].shares = shares;
     }
     return Object.values(by);
   }
