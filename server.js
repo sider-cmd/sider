@@ -8667,6 +8667,10 @@ const buildPortfolioFromWebState = (webState = {}) => {
     if (!code || !Number.isFinite(shares) || shares < 0) continue;
     const current = running.get(code) || { shares: 0, totalCost: 0 };
     current.shares = shares;
+    const averageCost = Number(override?.averageCost);
+    if (shares > 0 && current.totalCost <= 0 && Number.isFinite(averageCost) && averageCost > 0) {
+      current.totalCost = shares * averageCost;
+    }
     running.set(code, current);
   }
 

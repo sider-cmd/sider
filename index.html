@@ -1675,6 +1675,10 @@ select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.o
         };
       }
       by[symbol].shares = shares;
+      const averageCost = Number(override?.averageCost);
+      if (shares > 0 && by[symbol].totalCost <= 0 && Number.isFinite(averageCost) && averageCost > 0) {
+        by[symbol].totalCost = shares * averageCost;
+      }
     }
     return Object.values(by);
   }
