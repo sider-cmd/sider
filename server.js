@@ -9156,6 +9156,7 @@ const buildCanonicalCloudStateFromLine = async (ownerKey, existingState = {}) =>
       ...(existingState.customNames || {}),
       ...(lineState.customNames || {})
     },
+    holdingOverrides: existingState.holdingOverrides || {},
     excludedSymbols: normalizeExcludedWebSymbols({
       ...(existingState.excludedSymbols || {}),
       ...(lineState.excludedSymbols || {})
