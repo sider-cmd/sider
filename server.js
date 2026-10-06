@@ -8998,6 +8998,8 @@ const webRecordContentKey = (record = {}) => [
 const webRecordKey = (record = {}) =>
   normalizedWebRecordId(record) || webRecordContentKey(record);
 
+const CANONICAL_PORTFOLIO_DATA_VERSION = "2026-10-06-canonical-v1";
+
 const mergeWebRecords = (incomingRecords = [], existingRecords = []) => {
   const groupByContent = (records = []) => {
     const groups = new Map();
@@ -9427,7 +9429,25 @@ app.put('/api/cloud-state', requireWebSyncToken, async (req, res) => {
     const existingState = await getSupabaseWebCloudState(ownerKey).catch(() => null);
     if (!forceReplace) {
       if (existingState) {
-        state = mergeWebCloudState(state, existingState);
+        const incomingVersion = String(state.portfolioDataVersion || "");
+        const existingVersion = String(existingState.portfolioDataVersion || "");
+        if (
+          existingVersion === CANONICAL_PORTFOLIO_DATA_VERSION &&
+          incomingVersion !== CANONICAL_PORTFOLIO_DATA_VERSION
+        ) {
+          // Old browser builds used ID-based merging and can resend the entire
+          // portfolio under different IDs. Keep the verified portfolio rows,
+          // while still accepting harmless settings/price updates.
+          state = {
+            ...mergeWebCloudState(state, existingState),
+            trades: existingState.trades || [],
+            dividends: existingState.dividends || [],
+            portfolioDataVersion: CANONICAL_PORTFOLIO_DATA_VERSION,
+            _updatedAt: Date.now()
+          };
+        } else {
+          state = mergeWebCloudState(state, existingState);
+        }
       }
     }
     const portfolioChanged =
