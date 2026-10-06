@@ -9998,6 +9998,144 @@ app.get('/intraday/anomaly/check', requireConfiguredWebSyncToken, async (req, re
   }
 });
 
+// =================【外部股票工作流整合】=================
+const INTEGRATION_WEBHOOK_SECRET = String(process.env.INTEGRATION_WEBHOOK_SECRET || "").trim();
+const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
+const TELEGRAM_CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || "").trim();
+const GOOGLE_SHEETS_WEBHOOK_URL = String(process.env.GOOGLE_SHEETS_WEBHOOK_URL || "").trim();
+const N8N_SENTIMENT_WEBHOOK_URL = String(process.env.N8N_SENTIMENT_WEBHOOK_URL || "").trim();
+
+const requireIntegrationSecret = (req, res, next) => {
+  if (!INTEGRATION_WEBHOOK_SECRET) {
+    return res.status(503).json({ ok: false, error: "INTEGRATION_WEBHOOK_SECRET is not configured" });
+  }
+  const provided = String(
+    req.headers["x-integration-secret"] || req.query.secret || req.body?.secret || ""
+  );
+  if (provided !== INTEGRATION_WEBHOOK_SECRET) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
+  return next();
+};
+
+const pushWorkflowNotification = async (text) => {
+  const message = String(text || "").trim().slice(0, 4900);
+  if (!message) return { line: false, telegram: false };
+  const result = { line: false, telegram: false };
+  const ownerKey = await getWebSyncOwnerKey();
+  await client.pushMessage(ownerKey, { type: "text", text: message });
+  result.line = true;
+  if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
+    await axios.post(
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+      { chat_id: TELEGRAM_CHAT_ID, text: message },
+      { timeout: 8000 }
+    );
+    result.telegram = true;
+  }
+  return result;
+};
+
+app.get('/api/integrations/status', requireWebSyncToken, (req, res) => {
+  res.json({
+    ok: true,
+    order: ["tradingview", "chip", "finmind_sheets", "sentiment"],
+    integrations: {
+      tradingview: {
+        receiver: true,
+        webhookSecret: Boolean(INTEGRATION_WEBHOOK_SECRET),
+        line: true,
+        telegram: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID)
+      },
+      chip: {
+        provider: "FinMind",
+        configured: Boolean(FINMIND_TOKEN),
+        dailyReportEnabled: Boolean(DAILY_CHIP_MOVEMENT_ENABLED)
+      },
+      finmind_sheets: {
+        finMind: Boolean(FINMIND_TOKEN),
+        googleSheets: Boolean(GOOGLE_SHEETS_WEBHOOK_URL)
+      },
+      sentiment: {
+        receiver: true,
+        n8n: Boolean(N8N_SENTIMENT_WEBHOOK_URL),
+        webhookSecret: Boolean(INTEGRATION_WEBHOOK_SECRET),
+        telegram: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID)
+      }
+    }
+  });
+});
+
+app.post('/api/integrations/tradingview/webhook', requireIntegrationSecret, async (req, res) => {
+  try {
+    const symbol = String(req.body?.symbol || req.body?.ticker || "未知標的").trim();
+    const price = Number(req.body?.price || req.body?.close || 0);
+    const condition = String(req.body?.condition || req.body?.message || "觸發自訂警示").trim();
+    const timeframe = String(req.body?.timeframe || req.body?.interval || "").trim();
+    const notification = await pushWorkflowNotification(
+      `TradingView 警示\n\n標的：${symbol}\n條件：${condition}${price > 0 ? `\n價格：${price}` : ""}${timeframe ? `\n週期：${timeframe}` : ""}`
+    );
+    res.json({ ok: true, symbol, notification });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
+  }
+});
+
+app.post('/api/integrations/sentiment/webhook', requireIntegrationSecret, async (req, res) => {
+  try {
+    const symbol = String(req.body?.symbol || req.body?.stock || "市場").trim();
+    const score = Number(req.body?.score);
+    const label = String(req.body?.label || req.body?.sentiment || "中性").trim();
+    const posts = Number(req.body?.posts || req.body?.count || 0);
+    const summary = String(req.body?.summary || "").trim();
+    const notification = await pushWorkflowNotification(
+      `PTT／Dcard 情緒日報\n\n標的：${symbol}\n情緒：${label}${Number.isFinite(score) ? `（${score}）` : ""}${posts > 0 ? `\n樣本：${posts} 篇` : ""}${summary ? `\n摘要：${summary}` : ""}`
+    );
+    res.json({ ok: true, symbol, notification });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
+  }
+});
+
+app.post('/api/integrations/finmind-sheets/run', requireIntegrationSecret, async (req, res) => {
+  try {
+    if (!GOOGLE_SHEETS_WEBHOOK_URL) {
+      return res.status(503).json({ ok: false, error: "GOOGLE_SHEETS_WEBHOOK_URL is not configured" });
+    }
+    const ownerKey = await getWebSyncOwnerKey();
+    const report = await buildDailyChipMovementReport(ownerKey);
+    const holdings = await getPortfolio(ownerKey);
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      report,
+      holdings: [...holdings.entries()].map(([symbol, position]) => ({ symbol, ...position }))
+    };
+    const response = await axios.post(GOOGLE_SHEETS_WEBHOOK_URL, payload, { timeout: 15000 });
+    res.json({ ok: true, rows: payload.holdings.length, sheetAccepted: response.status >= 200 && response.status < 300 });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
+  }
+});
+
+app.post('/api/integrations/sentiment/run', requireIntegrationSecret, async (req, res) => {
+  try {
+    if (!N8N_SENTIMENT_WEBHOOK_URL) {
+      return res.status(503).json({ ok: false, error: "N8N_SENTIMENT_WEBHOOK_URL is not configured" });
+    }
+    const ownerKey = await getWebSyncOwnerKey();
+    const holdings = await getPortfolio(ownerKey);
+    const symbols = [...holdings.keys()];
+    const response = await axios.post(
+      N8N_SENTIMENT_WEBHOOK_URL,
+      { generatedAt: new Date().toISOString(), symbols },
+      { timeout: 15000 }
+    );
+    res.json({ ok: true, symbols: symbols.length, n8nAccepted: response.status >= 200 && response.status < 300 });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
+  }
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
