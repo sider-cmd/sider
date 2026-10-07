@@ -64,6 +64,7 @@ const intradayAnomalySettings = new Map();
 const dailyReportPushLog = new Set();
 const dailyReportSettings = new Map();
 const dailyChipMovementPushLog = new Set();
+const dailyBreakoutAlertPushLog = new Set();
 const linePushCooldownLog = new Map();
 const lineAgentInteractionMemory = new Map();
 const lineButlerLifeMemory = new Map();
@@ -351,6 +352,16 @@ const DAILY_CHIP_MOVEMENT_TIMES = (process.env.DAILY_CHIP_MOVEMENT_TIMES || "15:
   .filter(Boolean);
 const DAILY_CHIP_MOVEMENT_ENABLED =
   process.env.DAILY_CHIP_MOVEMENT_ENABLED !== "false";
+const DAILY_BREAKOUT_ALERT_TIMES = (process.env.DAILY_BREAKOUT_ALERT_TIMES || "14:50")
+  .split(",")
+  .map((time) => time.trim())
+  .filter(Boolean);
+const DAILY_BREAKOUT_ALERT_ENABLED = process.env.DAILY_BREAKOUT_ALERT_ENABLED !== "false";
+const BREAKOUT_LOOKBACK_DAYS = Math.max(20, Number(process.env.BREAKOUT_LOOKBACK_DAYS) || 63);
+const BREAKOUT_VOLUME_DAYS = Math.max(5, Number(process.env.BREAKOUT_VOLUME_DAYS) || 20);
+const BREAKOUT_VOLUME_MULTIPLIER = Math.max(1, Number(process.env.BREAKOUT_VOLUME_MULTIPLIER) || 1.5);
+const BREAKOUT_RSI_DAYS = Math.max(2, Number(process.env.BREAKOUT_RSI_DAYS) || 14);
+const BREAKOUT_RSI_MAX = Math.min(100, Number(process.env.BREAKOUT_RSI_MAX) || 70);
 const LINE_SCHEDULED_PUSH_MIN_GAP_MS =
   Number(process.env.LINE_SCHEDULED_PUSH_MIN_GAP_MS) || 60 * 60 * 1000;
 const LINE_ALERT_PUSH_MIN_GAP_MS =
@@ -9264,6 +9275,9 @@ const buildSystemDiagnostics = async () => {
       dailyChipMovementEnabled:
         LINE_STOCK_PUSH_ENABLED && DAILY_CHIP_MOVEMENT_ENABLED,
       dailyChipMovementTimes: DAILY_CHIP_MOVEMENT_TIMES,
+      dailyBreakoutAlertEnabled:
+        LINE_STOCK_PUSH_ENABLED && DAILY_BREAKOUT_ALERT_ENABLED,
+      dailyBreakoutAlertTimes: DAILY_BREAKOUT_ALERT_TIMES,
       scheduledPushCooldownMinutes: Math.round(LINE_SCHEDULED_PUSH_MIN_GAP_MS / 60000),
       alertPushCooldownMinutes: Math.round(LINE_ALERT_PUSH_MIN_GAP_MS / 60000)
     },
@@ -9274,7 +9288,8 @@ const buildSystemDiagnostics = async () => {
       intradayAnomalies: typeof checkAndPushIntradayAnomalies === "function",
       dailyReports: typeof checkAndPushDailyReports === "function",
       majorHolderWeekly: typeof buildMajorHolderWeeklyReport === "function",
-      dailyChipMovement: typeof buildDailyChipMovementReport === "function"
+      dailyChipMovement: typeof buildDailyChipMovementReport === "function",
+      dailyBreakoutAlerts: typeof scanDailyBreakoutAlerts === "function"
     },
     checks: {},
     warnings: []
@@ -10081,11 +10096,101 @@ const fetchInstitutionalHistory20 = async (symbol, name) => {
     .map((row) => ({ ...row, total: row.foreign + row.trust + row.dealer }));
 };
 
+const calculateWilderRsi = (closes, period = BREAKOUT_RSI_DAYS) => {
+  if (!Array.isArray(closes) || closes.length <= period) return null;
+  let gain = 0;
+  let loss = 0;
+  for (let index = 1; index <= period; index += 1) {
+    const change = closes[index] - closes[index - 1];
+    if (change >= 0) gain += change;
+    else loss -= change;
+  }
+  let averageGain = gain / period;
+  let averageLoss = loss / period;
+  for (let index = period + 1; index < closes.length; index += 1) {
+    const change = closes[index] - closes[index - 1];
+    averageGain = (averageGain * (period - 1) + Math.max(change, 0)) / period;
+    averageLoss = (averageLoss * (period - 1) + Math.max(-change, 0)) / period;
+  }
+  if (averageLoss === 0) return averageGain === 0 ? 50 : 100;
+  return 100 - 100 / (1 + averageGain / averageLoss);
+};
+
+const fetchFinMindBreakoutSignal = async (symbol, name) => {
+  const startDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const response = await axios.get(
+    `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${encodeURIComponent(symbol)}&start_date=${startDate}`,
+    { timeout: 12000 }
+  );
+  const rows = (response.data?.data || [])
+    .map((row) => ({ date: String(row.date || ""), close: Number(row.close), high: Number(row.max), volume: Number(row.Trading_Volume) }))
+    .filter((row) => row.date && Number.isFinite(row.close) && Number.isFinite(row.high) && Number.isFinite(row.volume))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const minimumRows = Math.max(BREAKOUT_LOOKBACK_DAYS + 1, BREAKOUT_VOLUME_DAYS + 1, BREAKOUT_RSI_DAYS + 1);
+  if (rows.length < minimumRows) return { symbol, name, available: false, reason: `歷史資料不足（${rows.length}/${minimumRows}）` };
+  const latest = rows.at(-1);
+  const priorRows = rows.slice(0, -1);
+  const priorHigh = Math.max(...priorRows.slice(-BREAKOUT_LOOKBACK_DAYS).map((row) => row.high));
+  const previousClose = priorRows.at(-1).close;
+  const averageVolume = priorRows.slice(-BREAKOUT_VOLUME_DAYS).reduce((sum, row) => sum + row.volume, 0) / BREAKOUT_VOLUME_DAYS;
+  const volumeRatio = averageVolume > 0 ? latest.volume / averageVolume : 0;
+  const rsi = calculateWilderRsi(rows.map((row) => row.close), BREAKOUT_RSI_DAYS);
+  const priceBreakout = previousClose <= priorHigh && latest.close > priorHigh;
+  const volumeConfirmed = volumeRatio >= BREAKOUT_VOLUME_MULTIPLIER;
+  const rsiAccepted = Number.isFinite(rsi) && rsi < BREAKOUT_RSI_MAX;
+  return { symbol, name, available: true, date: latest.date, close: latest.close, priorHigh, volumeRatio, rsi, priceBreakout, volumeConfirmed, rsiAccepted, triggered: priceBreakout && volumeConfirmed && rsiAccepted };
+};
+
+const scanDailyBreakoutAlerts = async ({ notify = false, force = false, onlyOwnerKey = null } = {}) => {
+  if (!hasPortfolioDb) return [];
+  const now = getTaipeiNow();
+  if (!force && (now.weekday === "Sat" || now.weekday === "Sun")) return [];
+  if (!force && !DAILY_BREAKOUT_ALERT_TIMES.includes(now.timeKey)) return [];
+  const ownerKeys = onlyOwnerKey ? [onlyOwnerKey] : await getPortfolioOwnerKeys();
+  const results = [];
+  for (const ownerKey of ownerKeys) {
+    const portfolio = await getPortfolio(ownerKey);
+    const holdings = [...portfolio.entries()].filter(([, position]) => Number(position?.shares) > 0);
+    const scans = [];
+    for (let index = 0; index < holdings.length; index += 3) {
+      const batchResults = await Promise.all(holdings.slice(index, index + 3).map(async ([symbol]) => {
+        try {
+          return await fetchFinMindBreakoutSignal(symbol, dailyName(symbol));
+        } catch (error) {
+          return { symbol, name: dailyName(symbol), available: false, reason: serviceErrorMessage(error) };
+        }
+      }));
+      scans.push(...batchResults);
+    }
+    const triggered = scans.filter((item) => item.triggered);
+    const newSignals = triggered.filter((item) => !dailyBreakoutAlertPushLog.has(`${item.date}|${item.symbol}|${ownerKey}`));
+    let pushed = false;
+    if (notify && newSignals.length > 0) {
+      const rows = newSignals.map((item) => `${stockLabel(item.symbol, item.name)}\n收盤 ${item.close.toFixed(2)}｜前 ${BREAKOUT_LOOKBACK_DAYS} 日高點 ${item.priorHigh.toFixed(2)}\n量比 ${item.volumeRatio.toFixed(2)} 倍｜RSI ${item.rsi.toFixed(1)}`);
+      await pushWorkflowNotification(`【持股突破警示】FinMind 免費掃描\n\n${rows.join("\n\n")}\n\n條件：突破前 ${BREAKOUT_LOOKBACK_DAYS} 日高點、成交量達 ${BREAKOUT_VOLUME_MULTIPLIER} 倍、RSI 低於 ${BREAKOUT_RSI_MAX}。\n僅供持股監控，不是買賣建議。`);
+      for (const item of newSignals) {
+        dailyBreakoutAlertPushLog.add(`${item.date}|${item.symbol}|${ownerKey}`);
+        await postGoogleSheetWorkflow({ type: "alert", source: "FinMind 免費突破掃描", symbol: item.symbol, name: item.name, condition: `突破${BREAKOUT_LOOKBACK_DAYS}日高點＋量增${BREAKOUT_VOLUME_MULTIPLIER}倍＋RSI低於${BREAKOUT_RSI_MAX}`, price: item.close, timeframe: "1D", delivery: "LINE 已通知" });
+      }
+      pushed = true;
+    }
+    results.push({ ownerKey, scanned: scans.length, available: scans.filter((item) => item.available).length, triggered: triggered.length, newSignals: newSignals.length, pushed, signals: triggered, failures: scans.filter((item) => !item.available) });
+  }
+  return results;
+};
+
 app.get('/api/integrations/status', requireWebSyncToken, (req, res) => {
   res.json({
     ok: true,
-    order: ["tradingview", "chip", "finmind_sheets", "sentiment"],
+    order: ["breakout_alert", "chip", "finmind_sheets", "sentiment"],
     integrations: {
+      breakout_alert: {
+        provider: "FinMind + Railway",
+        enabled: DAILY_BREAKOUT_ALERT_ENABLED,
+        times: DAILY_BREAKOUT_ALERT_TIMES,
+        line: true,
+        paidTradingViewRequired: false
+      },
       tradingview: {
         receiver: true,
         webhookSecret: Boolean(INTEGRATION_WEBHOOK_SECRET),
@@ -10208,6 +10313,17 @@ app.post('/api/integrations/sentiment/run', requireIntegrationSecret, async (req
       { timeout: 15000 }
     );
     res.json({ ok: true, symbols: symbols.length, n8nAccepted: response.status >= 200 && response.status < 300 });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
+  }
+});
+
+app.post('/api/integrations/breakout-scan/run', requireIntegrationSecret, async (req, res) => {
+  try {
+    const notify = req.body?.notify === true;
+    const ownerKey = await getWebSyncOwnerKey();
+    const results = await scanDailyBreakoutAlerts({ notify, force: true, onlyOwnerKey: ownerKey });
+    res.json({ ok: true, mode: notify ? "notify" : "dry-run", paidTradingViewRequired: false, results });
   } catch (error) {
     res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
   }
@@ -10348,6 +10464,22 @@ app.listen(PORT, '0.0.0.0', () => {
       }, DAILY_REPORT_INTERVAL_MS);
     } else {
       console.log("Daily chip movement scheduler disabled");
+    }
+    if (
+      LINE_STOCK_PUSH_ENABLED &&
+      DAILY_BREAKOUT_ALERT_ENABLED &&
+      DAILY_BREAKOUT_ALERT_TIMES.length > 0
+    ) {
+      console.log(
+        `Daily free breakout alert scheduler enabled. Times: ${DAILY_BREAKOUT_ALERT_TIMES.join(", ")}`
+      );
+      setInterval(() => {
+        scanDailyBreakoutAlerts({ notify: true }).catch((error) => {
+          console.error("Daily free breakout alert schedule failed:", error);
+        });
+      }, DAILY_REPORT_INTERVAL_MS);
+    } else {
+      console.log("Daily free breakout alert scheduler disabled");
     }
     setTimeout(() => {
       checkAndRepairWebCloudState()
