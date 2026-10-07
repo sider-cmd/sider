@@ -313,6 +313,9 @@ const estimateSellFee = (amount) => Math.round(amount * 0.001425);
 const estimateSellTax = (amount) => Math.round(amount * 0.003);
 const LINE_STOCK_PUSH_ENABLED =
   process.env.LINE_STOCK_PUSH_ENABLED === "true";
+const STOCK_NOTIFICATIONS_COST_BAND_ONLY =
+  process.env.STOCK_NOTIFICATIONS_COST_BAND_ONLY === "true";
+const PRICE_ALERTS_ENABLED = process.env.PRICE_ALERTS_ENABLED !== "false";
 const ALERT_CHECK_INTERVAL_MS =
   Number(process.env.ALERT_CHECK_INTERVAL_MS) || 10 * 60 * 1000;
 const INTRADAY_PUSH_INTERVAL_MS =
@@ -428,6 +431,12 @@ const getTaipeiNow = (date = new Date()) => {
     timeKey: `${pick("hour")}:${pick("minute")}`,
     weekday: pick("weekday")
   };
+};
+
+const isTaiwanMarketSession = (date = new Date()) => {
+  const now = getTaipeiNow(date);
+  if (now.weekday === "Sat" || now.weekday === "Sun") return false;
+  return now.timeKey >= "09:00" && now.timeKey <= "13:30";
 };
 
 const fetchAlertYahooQuote = async (code, timeoutMs = 2500) => {
@@ -1947,10 +1956,16 @@ const checkAndPushTieredCostAlerts = async () => {
   if (!hasPortfolioDb) {
     return;
   }
+  if (!isTaiwanMarketSession()) {
+    return;
+  }
 
   let alerts = [];
   try {
     alerts = await getAllActiveTieredCostAlerts();
+    if (STOCK_NOTIFICATIONS_COST_BAND_ONLY) {
+      alerts = alerts.filter((alert) => Number(alert.percent) === 30);
+    }
   } catch (error) {
     if (error?.response?.status === 404 || error?.response?.data?.code === "PGRST205") {
       console.log("Tiered cost alerts skipped: cost_band_alerts table is not ready");
@@ -9272,6 +9287,9 @@ const buildSystemDiagnostics = async () => {
     schedules: {
       priceAlertsMs: ALERT_CHECK_INTERVAL_MS,
       lineStockPushEnabled: LINE_STOCK_PUSH_ENABLED,
+      stockNotificationsCostBandOnly: STOCK_NOTIFICATIONS_COST_BAND_ONLY,
+      priceAlertsEnabled: LINE_STOCK_PUSH_ENABLED && PRICE_ALERTS_ENABLED,
+      tieredCostAlertMarketSession: "weekdays 09:00-13:30 Asia/Taipei",
       intradayAnalysisEnabled:
         LINE_STOCK_PUSH_ENABLED && INTRADAY_ANALYSIS_ENABLED,
       intradayAnalysisTimes: INTRADAY_ANALYSIS_TIMES,
@@ -10050,6 +10068,9 @@ const requireIntegrationSecret = (req, res, next) => {
 const pushWorkflowNotification = async (text) => {
   const message = String(text || "").trim().slice(0, 4900);
   if (!message) return { line: false };
+  if (STOCK_NOTIFICATIONS_COST_BAND_ONLY) {
+    return { line: false, skipped: "cost-band-only" };
+  }
   const result = { line: false };
   const ownerKey = await getWebSyncOwnerKey();
   await client.pushMessage(ownerKey, { type: "text", text: message });
@@ -10413,6 +10434,23 @@ app.post('/api/integrations/consolidated-report/run', requireIntegrationSecret, 
   }
 });
 
+app.post('/api/alerts/cost-band/reconcile', requireIntegrationSecret, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const execute = req.body?.execute === true;
+    const before = await getTieredCostAlerts(ownerKey);
+    if (!execute) {
+      return res.json({ ok: true, mode: "dry-run", before: before.length, targetPercent: 30 });
+    }
+    const removed = await deleteTieredCostAlerts(ownerKey);
+    const rows = await setupTieredCostAlerts(ownerKey, [30]);
+    const after = await getTieredCostAlerts(ownerKey);
+    res.json({ ok: true, mode: "execute", removed: removed.deleted, holdings: rows.length, activeAlerts: after.length, targetPercent: 30 });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
+  }
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
@@ -10470,9 +10508,11 @@ app.listen(PORT, '0.0.0.0', () => {
         )} seconds`
       );
       setInterval(() => {
-        checkAndPushPriceAlerts().catch((error) => {
-          console.error("自動價格提醒排程失敗:", error);
-        });
+        if (PRICE_ALERTS_ENABLED && !STOCK_NOTIFICATIONS_COST_BAND_ONLY) {
+          checkAndPushPriceAlerts().catch((error) => {
+            console.error("自動價格提醒排程失敗:", error);
+          });
+        }
         checkAndPushTieredCostAlerts().catch((error) => {
           console.error("Tiered cost alerts auto check failed:", error);
         });
