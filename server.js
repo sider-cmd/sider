@@ -10002,6 +10002,11 @@ app.get('/intraday/anomaly/check', requireConfiguredWebSyncToken, async (req, re
 const INTEGRATION_WEBHOOK_SECRET = String(process.env.INTEGRATION_WEBHOOK_SECRET || "").trim();
 const GOOGLE_SHEETS_WEBHOOK_URL = String(process.env.GOOGLE_SHEETS_WEBHOOK_URL || "").trim();
 const N8N_SENTIMENT_WEBHOOK_URL = String(process.env.N8N_SENTIMENT_WEBHOOK_URL || "").trim();
+const TRADINGVIEW_ALERT_DEDUP_MS = Math.max(
+  60_000,
+  Number(process.env.TRADINGVIEW_ALERT_DEDUP_MINUTES || 10) * 60_000
+);
+const recentTradingViewAlerts = new Map();
 
 const requireIntegrationSecret = (req, res, next) => {
   if (!INTEGRATION_WEBHOOK_SECRET) {
@@ -10024,6 +10029,23 @@ const pushWorkflowNotification = async (text) => {
   await client.pushMessage(ownerKey, { type: "text", text: message });
   result.line = true;
   return result;
+};
+
+const tradingViewAlertKey = ({ symbol, condition, timeframe }) =>
+  [symbol, condition, timeframe]
+    .map((value) => String(value || "").trim().toLowerCase().replace(/\s+/g, " "))
+    .join("|");
+
+const isDuplicateTradingViewAlert = (alert) => {
+  const now = Date.now();
+  for (const [key, receivedAt] of recentTradingViewAlerts) {
+    if (now - receivedAt >= TRADINGVIEW_ALERT_DEDUP_MS) recentTradingViewAlerts.delete(key);
+  }
+  const key = tradingViewAlertKey(alert);
+  const previousReceivedAt = recentTradingViewAlerts.get(key);
+  if (previousReceivedAt && now - previousReceivedAt < TRADINGVIEW_ALERT_DEDUP_MS) return true;
+  recentTradingViewAlerts.set(key, now);
+  return false;
 };
 
 const postGoogleSheetWorkflow = async (payload) => {
@@ -10094,13 +10116,26 @@ app.post('/api/integrations/tradingview/webhook', requireIntegrationSecret, asyn
     const price = Number(req.body?.price || req.body?.close || 0);
     const condition = String(req.body?.condition || req.body?.message || "觸發自訂警示").trim();
     const timeframe = String(req.body?.timeframe || req.body?.interval || "").trim();
+    if (isDuplicateTradingViewAlert({ symbol, condition, timeframe })) {
+      return res.status(202).json({
+        ok: true,
+        duplicate: true,
+        skipped: "相同警示已在 10 分鐘內處理，未重複傳送 LINE 或寫入試算表"
+      });
+    }
+    const isTest = /測試|驗收|test/i.test(condition);
+    const receivedAt = new Date().toLocaleString("zh-TW", {
+      timeZone: "Asia/Taipei",
+      hour12: false
+    });
+    const displayName = stockLabel(symbol, dailyName(symbol));
     const notification = await pushWorkflowNotification(
-      `TradingView 警示\n\n標的：${symbol}\n條件：${condition}${price > 0 ? `\n價格：${price}` : ""}${timeframe ? `\n週期：${timeframe}` : ""}`
+      `${isTest ? "【系統測試】" : "【正式警示】"}TradingView\n\n股票：${displayName}\n觸發原因：${condition}${price > 0 ? `\n觸發價格：${price} 元` : ""}${timeframe ? `\nK 線週期：${timeframe}` : ""}\n接收時間：${receivedAt}${isTest ? "\n\n這是系統測試，不是買賣建議。" : "\n\n請再配合持股成本、法人籌碼與風險控管判斷。"}`
     );
     const sheet = await postGoogleSheetWorkflow({
       type: "alert", source: "TradingView", symbol, name: dailyName(symbol), condition, price, timeframe, delivery: "LINE 已通知"
     });
-    res.json({ ok: true, symbol, notification, sheet });
+    res.json({ ok: true, duplicate: false, symbol, notification, sheet });
   } catch (error) {
     res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
   }
