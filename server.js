@@ -65,6 +65,8 @@ const dailyReportPushLog = new Set();
 const dailyReportSettings = new Map();
 const dailyChipMovementPushLog = new Set();
 const dailyBreakoutAlertPushLog = new Set();
+const consolidatedAiReportPushLog = new Set();
+const latestSentimentSignals = new Map();
 const linePushCooldownLog = new Map();
 const lineAgentInteractionMemory = new Map();
 const lineButlerLifeMemory = new Map();
@@ -362,6 +364,11 @@ const BREAKOUT_VOLUME_DAYS = Math.max(5, Number(process.env.BREAKOUT_VOLUME_DAYS
 const BREAKOUT_VOLUME_MULTIPLIER = Math.max(1, Number(process.env.BREAKOUT_VOLUME_MULTIPLIER) || 1.5);
 const BREAKOUT_RSI_DAYS = Math.max(2, Number(process.env.BREAKOUT_RSI_DAYS) || 14);
 const BREAKOUT_RSI_MAX = Math.min(100, Number(process.env.BREAKOUT_RSI_MAX) || 70);
+const CONSOLIDATED_AI_REPORT_ENABLED = process.env.CONSOLIDATED_AI_REPORT_ENABLED !== "false";
+const CONSOLIDATED_AI_REPORT_TIMES = (process.env.CONSOLIDATED_AI_REPORT_TIMES || "18:10")
+  .split(",")
+  .map((time) => time.trim())
+  .filter(Boolean);
 const LINE_SCHEDULED_PUSH_MIN_GAP_MS =
   Number(process.env.LINE_SCHEDULED_PUSH_MIN_GAP_MS) || 60 * 60 * 1000;
 const LINE_ALERT_PUSH_MIN_GAP_MS =
@@ -9278,6 +9285,9 @@ const buildSystemDiagnostics = async () => {
       dailyBreakoutAlertEnabled:
         LINE_STOCK_PUSH_ENABLED && DAILY_BREAKOUT_ALERT_ENABLED,
       dailyBreakoutAlertTimes: DAILY_BREAKOUT_ALERT_TIMES,
+      consolidatedAiReportEnabled:
+        LINE_STOCK_PUSH_ENABLED && CONSOLIDATED_AI_REPORT_ENABLED,
+      consolidatedAiReportTimes: CONSOLIDATED_AI_REPORT_TIMES,
       scheduledPushCooldownMinutes: Math.round(LINE_SCHEDULED_PUSH_MIN_GAP_MS / 60000),
       alertPushCooldownMinutes: Math.round(LINE_ALERT_PUSH_MIN_GAP_MS / 60000)
     },
@@ -9289,7 +9299,8 @@ const buildSystemDiagnostics = async () => {
       dailyReports: typeof checkAndPushDailyReports === "function",
       majorHolderWeekly: typeof buildMajorHolderWeeklyReport === "function",
       dailyChipMovement: typeof buildDailyChipMovementReport === "function",
-      dailyBreakoutAlerts: typeof scanDailyBreakoutAlerts === "function"
+      dailyBreakoutAlerts: typeof scanDailyBreakoutAlerts === "function",
+      consolidatedAiReport: typeof buildConsolidatedAiStockReport === "function"
     },
     checks: {},
     warnings: []
@@ -10179,6 +10190,57 @@ const scanDailyBreakoutAlerts = async ({ notify = false, force = false, onlyOwne
   return results;
 };
 
+const buildConsolidatedAiStockReport = async (ownerKey) => {
+  const now = getTaipeiNow();
+  const breakoutResults = await scanDailyBreakoutAlerts({ notify: false, force: true, onlyOwnerKey: ownerKey });
+  const breakout = breakoutResults[0] || { scanned: 0, triggered: 0, signals: [], failures: [] };
+  const breakoutText = breakout.signals.length > 0
+    ? breakout.signals.map((item) => `${stockLabel(item.symbol, item.name)}：收盤 ${item.close.toFixed(2)}、量比 ${item.volumeRatio.toFixed(2)}、RSI ${item.rsi.toFixed(1)}`).join("\n")
+    : `已掃描 ${breakout.scanned} 檔，今天沒有同時符合突破、量增與 RSI 條件的持股。`;
+
+  const chipReport = await buildDailyChipMovementReport(ownerKey);
+  const chipText = String(chipReport || "今日法人資料尚未完成。").slice(0, 2900);
+  const sentimentRows = [...latestSentimentSignals.values()]
+    .filter((item) => item.receivedDate === now.dateKey)
+    .slice(-8)
+    .map((item) => `${item.symbol}：${item.label}${Number.isFinite(item.score) ? `（${item.score}）` : ""}${item.summary ? `，${item.summary}` : ""}`);
+  const sentimentText = sentimentRows.length > 0
+    ? sentimentRows.join("\n")
+    : "今日尚未收到 PTT／Dcard 情緒資料；不以缺少資料推測多空。";
+
+  return toLineSafeText(`🤖 AI 股票助理每日整合
+${now.dateKey} ${now.timeKey}
+
+【1. 持股突破】
+${breakoutText}
+
+【2. 法人籌碼與 20 日趨勢】
+${chipText}
+
+【3. PTT／Dcard 市場情緒】
+${sentimentText}
+
+結論：以上是資料整理與風險提示，不會自動下單，也不是保證獲利建議。`);
+};
+
+const checkAndPushConsolidatedAiStockReports = async (force = false, onlyOwnerKey = null) => {
+  if (!hasPortfolioDb || (!CONSOLIDATED_AI_REPORT_ENABLED && !force)) return [];
+  const now = getTaipeiNow();
+  if (!force && (now.weekday === "Sat" || now.weekday === "Sun")) return [];
+  if (!force && !CONSOLIDATED_AI_REPORT_TIMES.includes(now.timeKey)) return [];
+  const ownerKeys = onlyOwnerKey ? [onlyOwnerKey] : await getPortfolioOwnerKeys();
+  const results = [];
+  for (const ownerKey of ownerKeys) {
+    const pushKey = `${now.dateKey}|consolidated-ai-stock-report|${ownerKey}`;
+    if (!force && consolidatedAiReportPushLog.has(pushKey)) continue;
+    const text = await buildConsolidatedAiStockReport(ownerKey);
+    await client.pushMessage(ownerKey, { type: "text", text: text.slice(0, 4900) });
+    consolidatedAiReportPushLog.add(pushKey);
+    results.push({ ownerKey, pushed: true });
+  }
+  return results;
+};
+
 app.get('/api/integrations/status', requireWebSyncToken, (req, res) => {
   res.json({
     ok: true,
@@ -10210,6 +10272,12 @@ app.get('/api/integrations/status', requireWebSyncToken, (req, res) => {
         n8n: Boolean(N8N_SENTIMENT_WEBHOOK_URL),
         webhookSecret: Boolean(INTEGRATION_WEBHOOK_SECRET),
         line: true
+      },
+      consolidated_ai_report: {
+        enabled: CONSOLIDATED_AI_REPORT_ENABLED,
+        times: CONSOLIDATED_AI_REPORT_TIMES,
+        line: true,
+        replacesSeparateNotifications: true
       }
     }
   });
@@ -10253,9 +10321,13 @@ app.post('/api/integrations/sentiment/webhook', requireIntegrationSecret, async 
     const label = String(req.body?.label || req.body?.sentiment || "中性").trim();
     const posts = Number(req.body?.posts || req.body?.count || 0);
     const summary = String(req.body?.summary || "").trim();
-    const notification = await pushWorkflowNotification(
-      `PTT／Dcard 情緒日報\n\n標的：${symbol}\n情緒：${label}${Number.isFinite(score) ? `（${score}）` : ""}${posts > 0 ? `\n樣本：${posts} 篇` : ""}${summary ? `\n摘要：${summary}` : ""}`
-    );
+    const now = getTaipeiNow();
+    latestSentimentSignals.set(symbol, { symbol, label, score, posts, summary, receivedDate: now.dateKey });
+    const notification = CONSOLIDATED_AI_REPORT_ENABLED
+      ? { line: false, deferredToConsolidatedReport: true }
+      : await pushWorkflowNotification(
+        `PTT／Dcard 情緒日報\n\n標的：${symbol}\n情緒：${label}${Number.isFinite(score) ? `（${score}）` : ""}${posts > 0 ? `\n樣本：${posts} 篇` : ""}${summary ? `\n摘要：${summary}` : ""}`
+      );
     const sheet = await postGoogleSheetWorkflow({
       type: "sentiment", source: req.body?.source || "PTT／Dcard", symbol, label, score, posts,
       summary, title: req.body?.title || "", url: req.body?.url || ""
@@ -10324,6 +10396,18 @@ app.post('/api/integrations/breakout-scan/run', requireIntegrationSecret, async 
     const ownerKey = await getWebSyncOwnerKey();
     const results = await scanDailyBreakoutAlerts({ notify, force: true, onlyOwnerKey: ownerKey });
     res.json({ ok: true, mode: notify ? "notify" : "dry-run", paidTradingViewRequired: false, results });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
+  }
+});
+
+app.post('/api/integrations/consolidated-report/run', requireIntegrationSecret, async (req, res) => {
+  try {
+    const notify = req.body?.notify === true;
+    const ownerKey = await getWebSyncOwnerKey();
+    const text = await buildConsolidatedAiStockReport(ownerKey);
+    if (notify) await client.pushMessage(ownerKey, { type: "text", text: text.slice(0, 4900) });
+    res.json({ ok: true, mode: notify ? "notify" : "dry-run", length: text.length, preview: text.slice(0, 500) });
   } catch (error) {
     res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
   }
@@ -10480,6 +10564,22 @@ app.listen(PORT, '0.0.0.0', () => {
       }, DAILY_REPORT_INTERVAL_MS);
     } else {
       console.log("Daily free breakout alert scheduler disabled");
+    }
+    if (
+      LINE_STOCK_PUSH_ENABLED &&
+      CONSOLIDATED_AI_REPORT_ENABLED &&
+      CONSOLIDATED_AI_REPORT_TIMES.length > 0
+    ) {
+      console.log(
+        `Consolidated AI stock report scheduler enabled. Times: ${CONSOLIDATED_AI_REPORT_TIMES.join(", ")}`
+      );
+      setInterval(() => {
+        checkAndPushConsolidatedAiStockReports().catch((error) => {
+          console.error("Consolidated AI stock report schedule failed:", error);
+        });
+      }, DAILY_REPORT_INTERVAL_MS);
+    } else {
+      console.log("Consolidated AI stock report scheduler disabled");
     }
     setTimeout(() => {
       checkAndRepairWebCloudState()
