@@ -10486,7 +10486,7 @@ const refreshThirtyPercentAlertsForCode = async (ownerKey, code, position) => {
 app.post('/api/integrations/broker-email/trade', requireIntegrationSecret, async (req, res) => {
   try {
     const ownerKey = await getWebSyncOwnerKey();
-    const code = resolveStockCode(req.body?.code);
+    const code = String(req.body?.code || "").trim().match(/^\d{4,6}$/)?.[0] || "";
     const type = req.body?.type === "sell" ? "sell" : req.body?.type === "buy" ? "buy" : "";
     const shares = Number(req.body?.shares);
     const price = Number(req.body?.price);
