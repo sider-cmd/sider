@@ -10098,7 +10098,7 @@ app.post('/api/integrations/tradingview/webhook', requireIntegrationSecret, asyn
       `TradingView 警示\n\n標的：${symbol}\n條件：${condition}${price > 0 ? `\n價格：${price}` : ""}${timeframe ? `\n週期：${timeframe}` : ""}`
     );
     const sheet = await postGoogleSheetWorkflow({
-      type: "alert", source: "TradingView", symbol, condition, price, timeframe, delivery: "LINE 已通知"
+      type: "alert", source: "TradingView", symbol, name: dailyName(symbol), condition, price, timeframe, delivery: "LINE 已通知"
     });
     res.json({ ok: true, symbol, notification, sheet });
   } catch (error) {
