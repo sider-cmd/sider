@@ -1769,6 +1769,16 @@ const getAllActiveTieredCostAlerts = async () => {
   }));
 };
 
+const COST_BAND_EXCLUDED_SYMBOLS = new Set(
+  String(process.env.COST_BAND_EXCLUDED_SYMBOLS || "00929,2834,2812")
+    .split(",")
+    .map((code) => code.trim())
+    .filter(Boolean)
+);
+
+const isCostBandExcluded = (code) =>
+  COST_BAND_EXCLUDED_SYMBOLS.has(String(code || "").trim());
+
 const deactivateTieredCostAlert = async (ownerKey, alert) => {
   if (!hasPortfolioDb) {
     const alerts = tieredCostAlerts.get(ownerKey) || [];
@@ -1806,6 +1816,7 @@ const setupTieredCostAlerts = async (ownerKey, percents) => {
   for (const percent of percents) {
     const costRows = await calculateCostBandRows(ownerKey, percent);
     for (const row of costRows) {
+      if (isCostBandExcluded(row.code)) continue;
       const upperAlert = {
         code: row.code,
         percent,
@@ -10445,7 +10456,15 @@ app.post('/api/alerts/cost-band/reconcile', requireIntegrationSecret, async (req
     const removed = await deleteTieredCostAlerts(ownerKey);
     const rows = await setupTieredCostAlerts(ownerKey, [30]);
     const after = await getTieredCostAlerts(ownerKey);
-    res.json({ ok: true, mode: "execute", removed: removed.deleted, holdings: rows.length, activeAlerts: after.length, targetPercent: 30 });
+    res.json({
+      ok: true,
+      mode: "execute",
+      removed: removed.deleted,
+      holdings: rows.length,
+      activeAlerts: after.length,
+      targetPercent: 30,
+      excludedSymbols: [...COST_BAND_EXCLUDED_SYMBOLS]
+    });
   } catch (error) {
     res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
   }
@@ -10468,11 +10487,12 @@ const sameBrokerTrade = (existing, incoming) => {
 };
 
 const refreshThirtyPercentAlertsForCode = async (ownerKey, code, position) => {
-  if (!hasPortfolioDb || !position || Number(position.shares) <= 0) return;
+  if (!hasPortfolioDb) return;
   await axios.delete(tieredCostAlertApiUrl(), {
     headers: supabaseHeaders(),
     params: { owner_key: `eq.${ownerKey}`, code: `eq.${code}` }
   });
+  if (isCostBandExcluded(code) || !position || Number(position.shares) <= 0) return;
   for (const [direction, ratio] of [["above", 1.3], ["below", 0.7]]) {
     await saveTieredCostAlert(ownerKey, {
       code,
