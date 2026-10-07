@@ -10451,6 +10451,87 @@ app.post('/api/alerts/cost-band/reconcile', requireIntegrationSecret, async (req
   }
 });
 
+const sameBrokerTrade = (existing, incoming) => {
+  const sameValues =
+    existing.code === incoming.code &&
+    existing.type === incoming.type &&
+    Number(existing.shares) === Number(incoming.shares) &&
+    Number(existing.price) === Number(incoming.price);
+  if (!sameValues) return false;
+  const existingAt = new Date(existing.tradedAt);
+  const incomingAt = new Date(incoming.tradedAt);
+  if (!Number.isFinite(existingAt.getTime()) || !Number.isFinite(incomingAt.getTime())) return false;
+  const sameDate = getTaipeiNow(existingAt).dateKey === getTaipeiNow(incomingAt).dateKey;
+  if (!sameDate) return false;
+  const existingHasSpecificTime = existingAt.getUTCHours() !== 0 || existingAt.getUTCMinutes() !== 0 || existingAt.getUTCSeconds() !== 0;
+  return !existingHasSpecificTime || Math.abs(existingAt.getTime() - incomingAt.getTime()) < 60_000;
+};
+
+const refreshThirtyPercentAlertsForCode = async (ownerKey, code, position) => {
+  if (!hasPortfolioDb || !position || Number(position.shares) <= 0) return;
+  await axios.delete(tieredCostAlertApiUrl(), {
+    headers: supabaseHeaders(),
+    params: { owner_key: `eq.${ownerKey}`, code: `eq.${code}` }
+  });
+  for (const [direction, ratio] of [["above", 1.3], ["below", 0.7]]) {
+    await saveTieredCostAlert(ownerKey, {
+      code,
+      percent: 30,
+      direction,
+      targetPrice: roundPrice(Number(position.averageCost) * ratio)
+    });
+  }
+};
+
+app.post('/api/integrations/broker-email/trade', requireIntegrationSecret, async (req, res) => {
+  try {
+    const ownerKey = await getWebSyncOwnerKey();
+    const code = resolveStockCode(req.body?.code);
+    const type = req.body?.type === "sell" ? "sell" : req.body?.type === "buy" ? "buy" : "";
+    const shares = Number(req.body?.shares);
+    const price = Number(req.body?.price);
+    const tradedAt = new Date(req.body?.tradedAt || "");
+    const source = String(req.body?.source || "").trim();
+    const orderId = String(req.body?.orderId || "").trim();
+    const dryRun = req.body?.dryRun === true;
+    if (source !== "fubon-email") return res.status(400).json({ ok: false, error: "Unsupported broker email source" });
+    if (!/^\d{4,6}$/.test(code) || !type || !(shares > 0) || !(price > 0) || !Number.isFinite(tradedAt.getTime())) {
+      return res.status(400).json({ ok: false, error: "Invalid broker trade payload" });
+    }
+    const incoming = { code, type, shares, price, fee: 0, tax: 0, realizedProfit: 0, tradedAt: tradedAt.toISOString() };
+    const trades = await getAllTrades(ownerKey);
+    if (trades.some((trade) => sameBrokerTrade(trade, incoming))) {
+      return res.json({ ok: true, duplicate: true, imported: false, code, orderId });
+    }
+    const portfolio = await getPortfolio(ownerKey);
+    const current = portfolio.get(code) || { shares: 0, averageCost: 0 };
+    let nextPosition = null;
+    if (type === "buy") {
+      const nextShares = Number(current.shares) + shares;
+      const nextAverageCost =
+        (Number(current.shares) * Number(current.averageCost) + shares * price) / nextShares;
+      nextPosition = { shares: nextShares, averageCost: Number(nextAverageCost.toFixed(4)) };
+    } else {
+      if (Number(current.shares) < shares) {
+        return res.status(409).json({ ok: false, conflict: true, error: "Holding shares are lower than broker sell shares", code, currentShares: Number(current.shares), sellShares: shares });
+      }
+      incoming.realizedProfit = (price - Number(current.averageCost)) * shares;
+      const nextShares = Number(current.shares) - shares;
+      nextPosition = nextShares > 0 ? { shares: nextShares, averageCost: Number(current.averageCost) } : null;
+    }
+    if (dryRun) return res.json({ ok: true, duplicate: false, imported: false, dryRun: true, code, type, shares, price, nextPosition, feesPending: true });
+    if (nextPosition) await savePortfolioPosition(ownerKey, code, nextPosition);
+    else await deletePortfolioPosition(ownerKey, code);
+    await recordTrade(ownerKey, incoming);
+    await refreshThirtyPercentAlertsForCode(ownerKey, code, nextPosition);
+    const readBackPortfolio = await getPortfolio(ownerKey);
+    const readBack = readBackPortfolio.get(code) || null;
+    res.json({ ok: true, duplicate: false, imported: true, code, type, shares, price, orderId, feesPending: true, holding: readBack });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: serviceErrorMessage(error) });
+  }
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
