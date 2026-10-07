@@ -10453,7 +10453,7 @@ app.post('/api/alerts/cost-band/reconcile', requireIntegrationSecret, async (req
 
 const sameBrokerTrade = (existing, incoming) => {
   const sameValues =
-    existing.code === incoming.code &&
+    String(existing.code || "").trim() === String(incoming.code || "").trim() &&
     existing.type === incoming.type &&
     Number(existing.shares) === Number(incoming.shares) &&
     Number(existing.price) === Number(incoming.price);
@@ -10461,10 +10461,10 @@ const sameBrokerTrade = (existing, incoming) => {
   const existingAt = new Date(existing.tradedAt);
   const incomingAt = new Date(incoming.tradedAt);
   if (!Number.isFinite(existingAt.getTime()) || !Number.isFinite(incomingAt.getTime())) return false;
-  const sameDate = getTaipeiNow(existingAt).dateKey === getTaipeiNow(incomingAt).dateKey;
-  if (!sameDate) return false;
-  const existingHasSpecificTime = existingAt.getUTCHours() !== 0 || existingAt.getUTCMinutes() !== 0 || existingAt.getUTCSeconds() !== 0;
-  return !existingHasSpecificTime || Math.abs(existingAt.getTime() - incomingAt.getTime()) < 60_000;
+  // Broker emails may include an execution time while older manual imports only
+  // preserve the trade date. Treat identical fills on the same Taipei trading
+  // day as duplicates so replaying historical mail never changes holdings.
+  return getTaipeiNow(existingAt).dateKey === getTaipeiNow(incomingAt).dateKey;
 };
 
 const refreshThirtyPercentAlertsForCode = async (ownerKey, code, position) => {
