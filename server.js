@@ -1169,7 +1169,7 @@ const roundPrice = (value) => Math.round(Number(value) * 100) / 100;
 
 const calculateCostBandRows = async (ownerKey, percent = 30) => {
   const portfolio = await getPortfolio(ownerKey);
-  const entries = analysisEntries([...portfolio.entries()]);
+  const entries = [...portfolio.entries()].filter(([, position]) => Number(position?.shares) > 0);
   const ratio = Number(percent) / 100;
   return entries
     .map(([code, position]) => {
