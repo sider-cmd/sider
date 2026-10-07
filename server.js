@@ -2270,6 +2270,10 @@ const lineAgentText = {
 12. 睡覺 23:50
 13. 作息紀錄
 14. 鬧鐘列表
+15. 帶我去 台北101
+16. 介紹這裡 台北101
+17. 直接傳送 LINE 定位，取得附近景點與導航連結
+18. 翻譯菜單（照片辨識需先啟用 AI 圖像費用）
 
 安全規則：
 - 我只做分析與建議，不會自動買賣股票。
@@ -2357,6 +2361,18 @@ const parseLineAgentIntent = (text) => {
     return { type: "searchInfo", input: searchMatch[1] };
   }
 
+  const navigationMatch = input.match(/^(?:帶我去|導航到|導航|我要去)\s+(.+)$/i);
+  if (navigationMatch) {
+    return { type: "navigation", input: navigationMatch[1] };
+  }
+  const placeGuideMatch = input.match(/^(?:介紹這裡|介紹景點|景點導覽)(?:\s+(.+))?$/i);
+  if (placeGuideMatch) {
+    return { type: "placeGuide", input: placeGuideMatch[1] || "" };
+  }
+  if (/^(?:翻譯菜單|菜單翻譯|翻譯menu|menu翻譯)$/i.test(input)) {
+    return { type: "menuTranslation" };
+  }
+
   const analysisMatch = input.match(/^(?:分析|AI分析|助理分析)\s*([0-9A-Za-z]{4,6}|\S+)$/i);
   if (analysisMatch) {
     return { type: "stockAnalysis", input: analysisMatch[1] };
@@ -2410,7 +2426,11 @@ const getButlerMemory = (ownerKey) => {
 const normalizeButlerLifeMemory = (value = {}) => ({
   wakeLogs: Array.isArray(value.wakeLogs) ? value.wakeLogs.slice(0, 30) : [],
   sleepLogs: Array.isArray(value.sleepLogs) ? value.sleepLogs.slice(0, 30) : [],
-  searches: Array.isArray(value.searches) ? value.searches.slice(0, 20) : []
+  searches: Array.isArray(value.searches) ? value.searches.slice(0, 20) : [],
+  pendingAction:
+    value.pendingAction && new Date(value.pendingAction.expiresAt).getTime() > Date.now()
+      ? value.pendingAction
+      : null
 });
 
 const normalizeButlerAgentMemory = (value = {}) => ({
@@ -2800,6 +2820,135 @@ ${item.link}`
   .join("\n\n")}
 
 你可以接著問：「整理 ${keyword}」或「找資料 更精準的關鍵字」。`);
+};
+
+const googleMapsDirectionsUrl = (destination) =>
+  `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(String(destination || "").trim())}`;
+
+const buildNavigationReply = (destination) => {
+  const target = String(destination || "").trim();
+  if (!target) return "請輸入目的地，例如：帶我去 台北101。";
+  return `導航目的地：${target}\n\n開啟 Google Maps：\n${googleMapsDirectionsUrl(target)}\n\n開車時請使用手機語音導航，不要操作螢幕。`;
+};
+
+const fetchWikipediaPlace = async (keyword) => {
+  const search = await axios.get("https://zh.wikipedia.org/w/api.php", {
+    params: {
+      action: "query",
+      list: "search",
+      srsearch: String(keyword || "").trim(),
+      srlimit: 1,
+      format: "json",
+      origin: "*"
+    },
+    headers: { "User-Agent": "LINE-AI-Butler/1.0" },
+    timeout: 10000
+  });
+  const title = search.data?.query?.search?.[0]?.title;
+  if (!title) return null;
+  const detail = await axios.get("https://zh.wikipedia.org/w/api.php", {
+    params: {
+      action: "query",
+      prop: "extracts|info",
+      inprop: "url",
+      exintro: 1,
+      explaintext: 1,
+      redirects: 1,
+      titles: title,
+      format: "json",
+      origin: "*"
+    },
+    headers: { "User-Agent": "LINE-AI-Butler/1.0" },
+    timeout: 10000
+  });
+  const page = Object.values(detail.data?.query?.pages || {})[0];
+  if (!page || page.missing !== undefined) return null;
+  return { title: page.title, extract: String(page.extract || "").trim(), url: page.fullurl };
+};
+
+const buildPlaceGuideReply = async (place) => {
+  const keyword = String(place || "").trim();
+  if (!keyword) return "請輸入景點名稱，例如：介紹這裡 赤崁樓；也可以直接傳送 LINE 定位。";
+  const page = await fetchWikipediaPlace(keyword);
+  if (!page) {
+    return `目前找不到「${keyword}」的可靠景點資料。請傳送 LINE 定位或改用更完整的景點名稱。`;
+  }
+  const summary = page.extract.length > 900 ? `${page.extract.slice(0, 900)}…` : page.extract;
+  return toLineSafeText(`景點導覽：${page.title}\n\n${summary || "暫時沒有可用的中文摘要。"}\n\n資料來源：${page.url}\n\n導航：${googleMapsDirectionsUrl(keyword)}`);
+};
+
+const buildNearbyPlaceGuideReply = async ({ latitude, longitude, address, title }) => {
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return "定位資料無效，請重新傳送 LINE 定位。";
+  const nearby = await axios.get("https://zh.wikipedia.org/w/api.php", {
+    params: {
+      action: "query",
+      list: "geosearch",
+      gscoord: `${lat}|${lng}`,
+      gsradius: 10000,
+      gslimit: 3,
+      format: "json",
+      origin: "*"
+    },
+    headers: { "User-Agent": "LINE-AI-Butler/1.0" },
+    timeout: 10000
+  });
+  const places = nearby.data?.query?.geosearch || [];
+  const locationName = String(title || address || `${lat},${lng}`).trim();
+  const rows = places.length
+    ? places.map((item, index) => `${index + 1}. ${item.title}（約 ${Math.round(Number(item.dist || 0))} 公尺）`).join("\n")
+    : "附近暫時查不到中文維基景點資料。";
+  return toLineSafeText(`目前位置：${locationName}\n\n附近景點：\n${rows}\n\n從這裡導航：\n${googleMapsDirectionsUrl(`${lat},${lng}`)}\n\n想深入了解可輸入：介紹這裡 景點名稱`);
+};
+
+const buildMenuTranslationReply = (ownerKey) => {
+  const visionReady = GEMINI_API_ENABLED && Boolean(GEMINI_API_KEY) && !DRY_RUN;
+  if (!visionReady) {
+    return "菜單照片翻譯尚未啟用：目前費用保護正在阻止付費圖像 API。導航、定位導覽、提醒與搜尋可正常使用；等你明確同意圖像 API 費用後，我再啟用照片翻譯。";
+  }
+  const memory = getButlerMemory(ownerKey);
+  memory.pendingAction = {
+    type: "menuTranslation",
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+  };
+  return "請傳送清楚的菜單照片。我會翻成繁體中文，並整理價格、食材、辣度與常見過敏原。";
+};
+
+const streamToBuffer = (stream) =>
+  new Promise((resolve, reject) => {
+    const chunks = [];
+    stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    stream.on("end", () => resolve(Buffer.concat(chunks)));
+    stream.on("error", reject);
+  });
+
+const translateMenuImage = async (ownerKey, messageId) => {
+  if (!GEMINI_API_ENABLED || !GEMINI_API_KEY || DRY_RUN) return buildMenuTranslationReply(ownerKey);
+  const contentStream = await client.getMessageContent(messageId);
+  const imageBuffer = await streamToBuffer(contentStream);
+  if (imageBuffer.length > 10 * 1024 * 1024) throw new Error("菜單照片超過 10MB，請縮小後重傳");
+  const response = await axios.post(
+    `${GEMINI_API_BASE_URL}/v1beta/models/${normalizeGeminiModelName(GEMINI_MODEL)}:generateContent`,
+    {
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: "辨識這張外國餐廳菜單並翻成繁體中文。逐項列出原文、中文名稱、價格、主要食材、辣度及可辨識的常見過敏原。看不清楚的內容要標示不確定，不可猜測。"
+            },
+            { inlineData: { mimeType: "image/jpeg", data: imageBuffer.toString("base64") } }
+          ]
+        }
+      ],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 2400 }
+    },
+    { headers: { "x-goog-api-key": GEMINI_API_KEY }, timeout: 45000 }
+  );
+  const memory = getButlerMemory(ownerKey);
+  memory.pendingAction = null;
+  return toLineSafeText(`菜單翻譯\n\n${extractGeminiText(response.data) || "照片中沒有辨識到清楚的菜單文字。"}`);
 };
 
 const normalizeGeminiModelName = (model) => String(model || GEMINI_MODEL).replace(/^models\//, "");
@@ -3449,6 +3598,9 @@ const buildLineAgentReply = async (intent, ownerKey) => {
   else if (intent.type === "setReminder") reply = addButlerReminder(ownerKey, intent.input);
   else if (intent.type === "reminderList") reply = buildButlerReminderList(ownerKey);
   else if (intent.type === "searchInfo") reply = await buildButlerSearchReport(ownerKey, intent.input);
+  else if (intent.type === "navigation") reply = buildNavigationReply(intent.input);
+  else if (intent.type === "placeGuide") reply = await buildPlaceGuideReply(intent.input);
+  else if (intent.type === "menuTranslation") reply = buildMenuTranslationReply(ownerKey);
   else if (intent.type === "stockAnalysis") reply = await buildLineAgentStockAnalysis(ownerKey, intent.input);
   else if (intent.type === "geminiButler") reply = await buildGeminiButlerReply(ownerKey, intent.input);
   else if (intent.type === "geminiStockReview") reply = await buildGeminiStockReview(ownerKey, intent.input);
@@ -4471,7 +4623,48 @@ app.post('/callback', line.middleware(config), async (req, res) => {
 
 // LINE 訊息處理核心
 async function handleEvent(event) {
-  if (event.type !== 'message' || event.message.type !== 'text') {
+  if (event.type !== 'message') {
+    return Promise.resolve(null);
+  }
+
+  const ownerKey = event.source?.userId || "default";
+  if (event.message.type === "location") {
+    try {
+      const text = await buildNearbyPlaceGuideReply(event.message);
+      return client.replyMessage(event.replyToken, { type: "text", text });
+    } catch (error) {
+      console.error("LINE location guide failed:", error);
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: "定位已收到，但附近景點資料暫時查詢失敗。你仍可輸入：帶我去 地點名稱。"
+      });
+    }
+  }
+
+  if (event.message.type === "image") {
+    try {
+      await hydrateButlerCloudState(ownerKey);
+      const memory = getButlerMemory(ownerKey);
+      const pending = normalizeButlerLifeMemory(memory).pendingAction;
+      if (pending?.type !== "menuTranslation") {
+        return client.replyMessage(event.replyToken, {
+          type: "text",
+          text: "照片已收到。若要翻譯菜單，請先輸入「翻譯菜單」，再傳送照片。"
+        });
+      }
+      const text = await translateMenuImage(ownerKey, event.message.id);
+      await saveButlerCloudState(ownerKey);
+      return client.replyMessage(event.replyToken, { type: "text", text });
+    } catch (error) {
+      console.error("LINE menu translation failed:", error);
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: `菜單照片處理失敗：${serviceErrorMessage(error)}\n請重新拍攝清楚、正面的照片後再試。`
+      });
+    }
+  }
+
+  if (event.message.type !== 'text') {
     return Promise.resolve(null);
   }
 
